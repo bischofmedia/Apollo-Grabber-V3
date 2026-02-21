@@ -491,8 +491,9 @@ def build_log_payload(grids: int) -> dict:
     Build the full Discord message payload for CHAN_LOG.
 
     Structure:
-      content    : header line + log lines as plain text (renders emojis large)
-      embeds[0]  : Stand / Sync with title "Stand" (used to identify log post)
+      content    : status line (emoji, title, date, driver/grid count)
+      embeds[0]  : log list as codeblock
+      embeds[1]  : Stand / Sync footer
     """
     emoji        = _status_emoji(grids)
     title        = state.get("event_title", "–")
@@ -504,30 +505,31 @@ def build_log_payload(grids: int) -> dict:
     locked      = state.get("sunday_lock") or state.get("man_lock")
     lock_symbol = " 🔒" if locked else ""
 
-    header = (
+    content = (
         f"{emoji} **{title}**\n"
-        f"{ev_dt} | Fahrer: {driver_count} | Grids: {grids}{lock_symbol}\n\n"
+        f"{ev_dt} | Fahrer: {driver_count} | Grids: {grids}{lock_symbol}"
     )
 
-    # Log lines as plain text – 2000 char limit for content, minus header
+    # Log embed – quote-block format, line-based truncation to 4096 chars
     raw_log = read_discord_log()
-    max_log = 2000 - len(header)
-    if len(raw_log) > max_log:
+    # Prefix each line with "> " for Discord quote-block rendering
+    quoted_log = "\n".join(f"> {line}" for line in raw_log.splitlines()) if raw_log else "> –"
+    max_desc = 4096
+    if len(quoted_log) > max_desc:
         lines = raw_log.splitlines()
-        while lines and len("\n".join(lines)) > max_log - len("[...]\n"):
+        while lines and len("\n".join(f"> {l}" for l in lines)) > max_desc - len("> [...]\n"):
             lines.pop(0)
-        raw_log = "[...]\n" + "\n".join(lines)
+        quoted_log = "> [...]\n" + "\n".join(f"> {l}" for l in lines)
 
-    content = header + (raw_log or "–")
+    log_embed = {
+        "description": quoted_log,
+    }
 
-    # Stand/Sync embed – title "Stand" is used by post_or_update_log to
-    # identify this message as the log post (not a command response).
     footer_embed = {
-        "title": "Stand",
         "description": f"Stand: {stand} | Sync: {last_sync}",
     }
 
-    return {"content": content, "embeds": [footer_embed]}
+    return {"content": content, "embeds": [log_embed, footer_embed]}
 
 
 async def post_or_update_log(session: aiohttp.ClientSession, payload: dict) -> None:
@@ -541,11 +543,12 @@ async def post_or_update_log(session: aiohttp.ClientSession, payload: dict) -> N
     """
     messages = await get_channel_messages(session, CHAN_LOG, DISCORD_TOKEN_APOLLOGRABBER)
 
-    # Identify log post: bot message with an embed titled "Stand"
+    # Identify log post: bot message with exactly 2 embeds (log + footer).
+    # Command response messages have 0 or 1 embed and are never overwritten.
     log_msgs = [
         m for m in messages
         if m.get("author", {}).get("bot") is True
-        and any(e.get("title") == "Stand" for e in m.get("embeds", []))
+        and len(m.get("embeds", [])) == 2
     ]
 
     if log_msgs:

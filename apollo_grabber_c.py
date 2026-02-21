@@ -231,8 +231,24 @@ def _validate_var(param: str, val: str) -> str | None:
 # Command handler  (Block 11)
 # ─────────────────────────────────────────────
 
+KNOWN_COMMANDS = (
+    "!help",
+    "!clean codes",
+    "!clean log",
+    "!clean news",
+    "!set",
+    "!grids=",
+)
+
+
+def _is_command(content: str) -> bool:
+    """Return True if the message content matches a known command."""
+    lower = content.lower().strip()
+    return any(lower == cmd or lower.startswith(cmd) for cmd in KNOWN_COMMANDS)
+
+
 async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> None:
-    """Scan CHAN_ORDERS for commands. Delete each message; execute if authorised."""
+    """Scan CHAN_ORDERS for commands. Only delete messages that match a known command."""
     messages = await get_channel_messages(session, CHAN_ORDERS, DISCORD_TOKEN_APOLLOGRABBER, limit=20)
 
     for msg in messages:
@@ -241,7 +257,12 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
         msg_id    = msg.get("id", "")
         username  = msg.get("author", {}).get("username", "Unknown")
 
-        # Always delete the command message (Kanal-Hygiene)
+        # Only process messages that match a known command pattern.
+        # This protects log posts and any other non-command content in the channel.
+        if not _is_command(content):
+            continue
+
+        # Delete the command message
         await discord_delete(
             session,
             f"/channels/{CHAN_ORDERS}/messages/{msg_id}",
@@ -364,27 +385,21 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
 async def bootstrap(session: aiohttp.ClientSession) -> None:
     """
     Run once when no state.json existed at startup (fresh Render deploy).
-    Clears data files and CHAN_LOG. No placeholder post — the first real
-    pipeline run will post the log when the Apollo event is found.
+    Does NOT touch CHAN_LOG or CHAN_CODES — those channels are only cleaned
+    when a genuinely new event is detected (had_previous_event=True).
     """
     log.info("Bootstrap: Erstinitialisierung …")
-    bot_user_id = await get_bot_user_id(session, DISCORD_TOKEN_APOLLOGRABBER)
 
-    # 1. Clear / create data files
+    # Clear / create local data files only
     for fp in (EVENT_LOG_FILE, DISCORD_LOG_FILE, ANMELDUNGEN_FILE):
         fp.write_text("", encoding="utf-8")
 
-    # 2. Clear CHAN_LOG — no placeholder, log_id reset to ""
-    await clear_chan_log(session, bot_user_id)
-
-    # 3. Mark event_id as unknown
+    # Reset event sentinel so first pipeline run detects the current event
     state["event_id"] = "0"
+    state["log_id"]   = ""
     state["registration_end_monday"] = ""
 
-    # 4. Persist
     save_state()
-
-    # 5. Write bootstrap marker to event_log
     append_event_log("Update eingespielt.")
     log.info("Bootstrap abgeschlossen.")
 
@@ -469,11 +484,12 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
         for fp in (EVENT_LOG_FILE, DISCORD_LOG_FILE, ANMELDUNGEN_FILE):
             fp.write_text("", encoding="utf-8")
 
-        # Lobby-code cleanup
-        await clean_lobby_codes(session)
-
-        # Clear CHAN_LOG – delete all own messages, reset log_id
-        await clear_chan_log(session, bot_user_id)
+        # CHAN_CODES and CHAN_LOG cleanup only when a real previous event existed.
+        # On a fresh deploy (had_previous_event=False) these channels are left
+        # untouched — the existing log post stays, CHAN_CODES is not wiped.
+        if had_previous_event:
+            await clean_lobby_codes(session)
+            await clear_chan_log(session, bot_user_id)
 
         append_event_log("New Event.")
         save_state()

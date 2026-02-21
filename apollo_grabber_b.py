@@ -299,67 +299,82 @@ def process_driver_changes(
     reg_end: bool,
 ) -> dict:
     """
-    Compare new_drivers against old_drivers. Append 🟢/🔴/🟡 lines to event_log.txt.
-    Returns dict: {added, removed, moved_up, waitlisted}.
+    Compare new_drivers against old_drivers. Append transition lines to event_log.txt.
 
-    FIX #2 / #3:
-    - old_drivers comes directly from state["drivers"] (no file parsing needed).
-    - event_log.txt stores ONLY An-/Abmeldungen with timestamp – nothing else.
-    - On a fresh deploy (old_drivers=[]), ALL current drivers are treated as new sign-ups.
-    - Nachrücker (moved_up) are detected via driver_status comparison; they are NOT
-      written to event_log.txt (only shown in discord_log via build_discord_log).
+    Log format:
+      🟢 Name              new sign-up into grid
+      🟡 Name              new sign-up onto waitlist
+      🔴 Name              cancellation
+      🔴🔴 Name          post-deadline sign-up (ignored)
+      🟢 -> 🟡 Name     grid demoted to waitlist
+      🟡 -> 🟢 Name     waitlist promoted to grid (move-up)
+      🔴 -> 🟢 Name     re-registration into grid
+      🔴 -> 🟡 Name     re-registration onto waitlist
+
+    Move-ups ARE written to event_log.txt so !clean log can include them.
     """
-    capacity = grid_capacity(new_grids)
-    old_set = set(old_drivers)
-    new_set = set(new_drivers)
+    capacity  = grid_capacity(new_grids)
+    old_set   = set(old_drivers)
+    new_set   = set(new_drivers)
+    old_status = state.get("driver_status", {})
 
-    added = []
-    removed = []
-    moved_up = []
+    added      = []
+    removed    = []
+    moved_up   = []
     waitlisted = []
+    ignored    = []
 
-    # Removals (in old, not in new)
+    # Removals
     for name in old_drivers:
         if name not in new_set:
             removed.append(name)
-            append_event_log(f"{ts_str()} 🔴 {name}")
+            prev = old_status.get(name)
+            if prev == "grid":
+                append_event_log(f"{ts_str()} 🟢 -> 🔴 {name}")
+            elif prev == "waitlist":
+                append_event_log(f"{ts_str()} 🟡 -> 🔴 {name}")
+            else:
+                append_event_log(f"{ts_str()} 🔴 {name}")
 
-    # Additions (in new, not in old)
-    # Position in new_drivers list determines grid vs waitlist
-    ignored = []
+    # Additions and status changes
     for i, name in enumerate(new_drivers):
+        cur = "grid" if i < capacity else "waitlist"
+        prev = old_status.get(name)
+
         if name not in old_set:
+            # New driver
             if reg_end:
-                # After registration deadline: sign-up is visible in Apollo but
-                # not accepted. Log with 🔴🔴 so it's visible but cannot move up.
                 ignored.append(name)
                 append_event_log(f"{ts_str()} 🔴🔴 {name}")
                 continue
-            if i < capacity:
+            if cur == "grid":
                 added.append(name)
-                append_event_log(f"{ts_str()} 🟢 {name}")
+                if prev is not None:
+                    append_event_log(f"{ts_str()} 🔴 -> 🟢 {name}")
+                else:
+                    append_event_log(f"{ts_str()} 🟢 {name}")
             else:
                 waitlisted.append(name)
-                append_event_log(f"{ts_str()} 🟡 {name}")
-
-    # Move-ups: previously waitlist, now in grid.
-    # Ignored drivers (🔴🔴) are explicitly excluded – they must never move up.
-    old_status = state.get("driver_status", {})
-    ignored_set = set(ignored)
-    new_status = classify_drivers(new_drivers, new_grids)
-    for name, new_s in new_status.items():
-        if name in ignored_set:
-            continue
-        if old_status.get(name) == "waitlist" and new_s == "grid":
-            moved_up.append(name)
-    # move-ups are NOT written to event_log.txt (Block 2 / FIX #3)
+                if prev is not None:
+                    append_event_log(f"{ts_str()} 🔴 -> 🟡 {name}")
+                else:
+                    append_event_log(f"{ts_str()} 🟡 {name}")
+        else:
+            # Existing driver – check for status change
+            if prev == "waitlist" and cur == "grid":
+                moved_up.append(name)
+                append_event_log(f"{ts_str()} 🟡 -> 🟢 {name}")
+            elif prev == "grid" and cur == "waitlist":
+                waitlisted.append(name)
+                append_event_log(f"{ts_str()} 🟢 -> 🟡 {name}")
+            # unchanged: no entry
 
     return {
-        "added": added,
-        "removed": removed,
-        "moved_up": moved_up,
+        "added":      added,
+        "removed":    removed,
+        "moved_up":   moved_up,
         "waitlisted": waitlisted,
-        "ignored": ignored,
+        "ignored":    ignored,
     }
 
 
@@ -369,80 +384,61 @@ def process_driver_changes(
 
 def build_discord_log(grids: int) -> str:
     """
-    Rebuild discord_log.txt from event_log.txt:
-    - Strip backslashes (Block 6.1)
-    - Replay event history to track current grid/waitlist state
-    - Append (auf Warteliste) / (zurück von Warteliste) annotations (Block 6.2)
-    - FIX #3: Nachrücker annotation derived from status replay, not stored in event_log
-
-    FIX #9: "(zurück von Warteliste)" text is only appended when
-    var_SET_MSG_MOVED_UP_TEXT = 1.
+    Rebuild discord_log.txt from event_log.txt.
+    All status transitions are already written in arrow format by
+    process_driver_changes(), so this function just strips backslashes
+    and passes lines through. System lines (⚙️) pass through unchanged.
     """
-    show_moved_up_text = int(cfg("SET_MSG_MOVED_UP_TEXT")) == 1
-    capacity = grid_capacity(grids)
     raw_lines = read_event_log().splitlines()
-
-    # Replay to track who is in grid vs waitlist at each point in history
-    # We process lines sequentially and maintain a running ordered list
-    out_lines = []
-    running: list = []  # ordered list of currently registered drivers
-
-    for line in raw_lines:
-        stripped = line.replace("\\", "")  # FIX #6-style: backslash removal for display
-
-        if "🟢" in line:
-            parts = line.split(None, 2)
-            name = parts[2].replace("\\", "").strip() if len(parts) >= 3 else ""
-            if name and name not in running:
-                running.append(name)
-            out_lines.append(stripped)
-
-        elif "🟡" in line:
-            parts = line.split(None, 2)
-            name = parts[2].replace("\\", "").strip() if len(parts) >= 3 else ""
-            if name and name not in running:
-                running.append(name)
-            # Annotate waitlist entry
-            out_lines.append(f"{stripped} (auf Warteliste)")
-
-        elif "🔴" in line:
-            parts = line.split(None, 2)
-            name = parts[2].replace("\\", "").strip() if len(parts) >= 3 else ""
-
-            # 🔴🔴 = post-deadline ignored sign-up: pass through, no move-up logic,
-            # driver is not in running list so nothing to remove.
-            if "🔴🔴" in line:
-                out_lines.append(stripped)
-                continue
-
-            moved_up_names = []
-            if name in running:
-                pos_removed = running.index(name)
-                # Snapshot of who was on the waitlist BEFORE removal
-                on_waitlist_before = set(running[capacity:])
-                running.remove(name)
-                # After removal: everyone now at index < capacity who was previously
-                # on the waitlist has moved up. Capacity stays the same; the list
-                # is now one shorter, so the boundary shifts automatically.
-                # All drivers currently at indices [capacity-1 .. len-1] that were
-                # in on_waitlist_before have moved up.
-                for idx, driver in enumerate(running):
-                    if idx >= capacity - 1 and driver in on_waitlist_before:
-                        # This driver's new position is still >= capacity-1 but they
-                        # were on waitlist before; crossed the boundary only if now < capacity
-                        if idx < capacity:
-                            moved_up_names.append(driver)
-
-            out_lines.append(stripped)
-            suffix = " (zurück von Warteliste)" if show_moved_up_text else ""
-            for moved_name in moved_up_names:
-                out_lines.append(f"  🟡 -> 🟢 {moved_name}{suffix}")
-
-        else:
-            # System lines (⚙️ Systemneustart, ⚙️ Neues Event, etc.) – pass through
-            out_lines.append(stripped)
-
+    out_lines = [line.replace("\\", "") for line in raw_lines]
     return "\n".join(out_lines)
+
+
+def build_clean_log(grids: int) -> str:
+    """
+    Build a compacted log for !clean log:
+    - All system lines are removed
+    - For each driver only their CURRENT status is kept (from state["driver_status"])
+    - Each driver appears exactly once with their current emoji
+    - Drivers with status 'removed' (not in driver_status) get 🔴
+    - A single system line ⚙️ Clean Log is prepended with current timestamp
+    """
+    current_status = state.get("driver_status", {})
+    # Collect all known drivers from event_log to preserve ordering
+    seen: list = []
+    seen_set: set = set()
+    for line in read_event_log().splitlines():
+        # Extract driver name from any status line (contains a circle emoji)
+        for emoji in ["🟢", "🟡", "🔴"]:
+            if emoji in line:
+                parts = line.split()
+                # Name is everything after the last emoji token
+                # Format: "WD hh:mm EMOJI Name" or "WD hh:mm EMOJI -> EMOJI Name"
+                try:
+                    # Find last emoji index in parts
+                    last_emoji_idx = max(
+                        i for i, p in enumerate(parts)
+                        if any(e in p for e in ["🟢", "🟡", "🔴"])
+                    )
+                    name = " ".join(parts[last_emoji_idx + 1:]).strip()
+                    if name and name not in seen_set:
+                        seen.append(name)
+                        seen_set.add(name)
+                except (ValueError, IndexError):
+                    pass
+                break
+
+    lines = [f"{ts_str()} ⚙️ Clean Log"]
+    for name in seen:
+        status = current_status.get(name)
+        if status == "grid":
+            lines.append(f"🟢 {name}")
+        elif status == "waitlist":
+            lines.append(f"🟡 {name}")
+        else:
+            # Not in current state = cancelled
+            lines.append(f"🔴 {name}")
+    return "\n".join(lines)
 
 
 # ─────────────────────────────────────────────

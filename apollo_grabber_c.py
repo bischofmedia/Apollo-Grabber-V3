@@ -25,11 +25,11 @@ from apollo_grabber_a import (
     ts_str, write_discord_log, write_anmeldungen, cfg, _coerce_var,
 )
 from apollo_grabber_b import (
-    build_discord_log, build_html_dashboard, build_log_payload,
+    build_clean_log, build_discord_log, build_html_dashboard, build_log_payload,
     calculate_grids, check_extra_grid, clean_lobby_codes, clear_chan_log,
     classify_drivers, delete_all_bot_messages, delete_all_messages,
     discord_delete, discord_get, discord_patch, discord_post,
-    find_apollo_message, get_bot_user_id, get_channel_messages,
+    find_apollo_message, get_bot_user_id, get_channel_messages, grid_capacity,
     message_exists, parse_apollo_embed, post_or_update_log,
     process_driver_changes, recalculate_grids, send_to_make,
 )
@@ -74,13 +74,42 @@ def _format_bilingual(de_text: str, en_text: str) -> str:
 # News message senders  (Block 9)
 # ─────────────────────────────────────────────
 
+def _format_names(names: list, conjunction: str = "und") -> str:
+    """
+    Join a list of driver names with commas, replacing the last comma with conjunction.
+    ['A', 'B', 'C'] -> 'A, B und C'
+    ['A'] -> 'A'
+    """
+    clean = [n.replace("\\", "") for n in names]
+    if len(clean) <= 1:
+        return clean[0] if clean else ""
+    return ", ".join(clean[:-1]) + f" {conjunction} " + clean[-1]
+
+
+# ─────────────────────────────────────────────
+# News message senders  (Block 9)
+# ─────────────────────────────────────────────
+
 async def send_sunday_msg(session: aiohttp.ClientSession) -> None:
     """Block 9.2 – post Sunday notification once per event."""
     if not int(cfg("ENABLE_SUNDAY_MSG")):
         return
     if state.get("sunday_msg_sent"):
         return
+    grids        = int(state.get("last_grid_count", 0))
+    driver_count = len(state.get("drivers", []))
+    capacity     = grid_capacity(grids)
+    free_slots   = max(0, capacity - driver_count)
     de, en = _pick_bilingual(MSG_SUNDAY_TEXT, MSG_SUNDAY_TEXT_EN)
+    for tmpl, lang in [(de, "de"), (en, "en")]:
+        if lang == "de":
+            de = tmpl.replace("{driver_count}", str(driver_count)) \
+                     .replace("{grids}", str(grids)) \
+                     .replace("{free_slots}", str(free_slots))
+        else:
+            en = tmpl.replace("{driver_count}", str(driver_count)) \
+                     .replace("{grids}", str(grids)) \
+                     .replace("{free_slots}", str(free_slots))
     text = _format_bilingual(de, en)
     if text:
         await discord_post(session, f"/channels/{CHAN_NEWS}/messages",
@@ -96,11 +125,14 @@ async def send_waitlist_msg(session: aiohttp.ClientSession, names: list) -> None
         return
     if len(names) == 1:
         de, en = _pick_bilingual(MSG_WAITLIST_SINGLE, MSG_WAITLIST_SINGLE_EN)
+        name_de = _format_names(names, "und")
+        name_en = _format_names(names, "and")
     else:
         de, en = _pick_bilingual(MSG_WAITLIST_MULTI, MSG_WAITLIST_MULTI_EN)
-    name_str = ", ".join(n.replace("\\", "") for n in names)
-    de = de.replace("{names}", name_str).replace("{name}", name_str)
-    en = en.replace("{names}", name_str).replace("{name}", name_str)
+        name_de = _format_names(names, "und")
+        name_en = _format_names(names, "and")
+    de = de.replace("{driver_names}", name_de)
+    en = en.replace("{driver_names}", name_en)
     text = _format_bilingual(de, en)
     if text:
         await discord_post(session, f"/channels/{CHAN_NEWS}/messages",
@@ -113,11 +145,14 @@ async def send_moved_up_msg(session: aiohttp.ClientSession, names: list) -> None
         return
     if len(names) == 1:
         de, en = _pick_bilingual(MSG_MOVED_UP_SINGLE, MSG_MOVED_UP_SINGLE_EN)
+        name_de = _format_names(names, "und")
+        name_en = _format_names(names, "and")
     else:
         de, en = _pick_bilingual(MSG_MOVED_UP_MULTI, MSG_MOVED_UP_MULTI_EN)
-    name_str = ", ".join(n.replace("\\", "") for n in names)
-    de = de.replace("{names}", name_str).replace("{name}", name_str)
-    en = en.replace("{names}", name_str).replace("{name}", name_str)
+        name_de = _format_names(names, "und")
+        name_en = _format_names(names, "and")
+    de = de.replace("{driver_names}", name_de)
+    en = en.replace("{driver_names}", name_en)
     text = _format_bilingual(de, en)
     if text:
         await discord_post(session, f"/channels/{CHAN_NEWS}/messages",
@@ -131,6 +166,8 @@ async def send_grid_full_msg(session: aiohttp.ClientSession, new_grids: int) -> 
     if new_grids < int(cfg("SET_MIN_GRIDS_MSG")):
         return
     de, en = _pick_bilingual(MSG_GRID_FULL_TEXT, MSG_GRID_FULL_TEXT_EN)
+    de = de.replace("{full_grids}", str(new_grids))
+    en = en.replace("{full_grids}", str(new_grids))
     text = _format_bilingual(de, en)
     if text:
         await discord_post(session, f"/channels/{CHAN_NEWS}/messages",
@@ -141,7 +178,10 @@ async def send_extra_grid_msg(session: aiohttp.ClientSession) -> None:
     """Block 9.6 – notify when an extra grid opens despite a lock."""
     if not int(cfg("ENABLE_EXTRA_GRID_MSG")) or not int(cfg("ENABLE_EXTRA_GRID")):
         return
+    grids = int(state.get("last_grid_count", 0))
     de, en = _pick_bilingual(MSG_EXTRA_GRID_TEXT, MSG_EXTRA_GRID_TEXT_EN)
+    de = de.replace("{grid}", str(grids))
+    en = en.replace("{grid}", str(grids))
     text = _format_bilingual(de, en)
     if text:
         await discord_post(session, f"/channels/{CHAN_NEWS}/messages",
@@ -305,10 +345,12 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
             continue
 
         # ── !clean log ────────────────────────────────────────────────────
-        # FIX #6: correct log entry text; no double rebuild/post
         if content_lower == "!clean log":
-            log_line = f"{ts} ⚠️ Cleanlog durch {username}"
-            append_event_log(log_line)
+            # Rebuild event_log.txt to compacted form, then refresh Discord
+            clean_content = build_clean_log(grids)
+            # Replace event_log.txt with the clean version
+            from apollo_grabber_a import EVENT_LOG_FILE
+            EVENT_LOG_FILE.write_text(clean_content, encoding="utf-8")
             _rebuild_discord_log(grids)
             await _refresh_chan_log(session)
             continue
@@ -411,15 +453,16 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
                 if s == "grid" and old_status.get(n) == "waitlist"
             ]
 
-            # Log individual status changes
-            for n in newly_waitlisted:
-                append_event_log(f"{ts} 🟡 {n}")
+            # 1. Command entry FIRST
+            append_event_log(f"{ts} 🔒 Grids auf {new_g} gesetzt durch {username}")
+
+            # 2. Status changes AFTER the command entry
             for n in newly_moved_up:
-                append_event_log(f"{ts} 🟢 {n}")
+                append_event_log(f"{ts} 🟡 -> 🟢 {n}")
+            for n in newly_waitlisted:
+                append_event_log(f"{ts} 🟢 -> 🟡 {n}")
 
             save_state()
-            log_line = f"{ts} 🔒 Grids auf {new_g} gesetzt durch {username}"
-            append_event_log(log_line)
             _rebuild_discord_log(new_g)
             await _refresh_chan_log(session)
 

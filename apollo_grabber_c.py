@@ -232,9 +232,7 @@ def _validate_var(param: str, val: str) -> str | None:
 
 KNOWN_COMMANDS = (
     "!help",
-    "!clean codes",
-    "!clean log",
-    "!clean news",
+    "!clean",
     "!set",
     "!grids=",
 )
@@ -283,6 +281,20 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
             )
             continue
 
+        # ── !clean (ohne Parameter) ───────────────────────────────────────
+        if content_lower == "!clean":
+            await discord_post(
+                session, f"/channels/{CHAN_ORDERS}/messages",
+                DISCORD_TOKEN_APOLLOGRABBER,
+                {"content": (
+                    "**!clean** – Verfügbare Optionen:\n"
+                    "`!clean codes` – Lobby-Code-Kanal leeren und Platzhalter posten\n"
+                    "`!clean log` – Log neu aufbauen und aktualisieren\n"
+                    "`!clean news` – Alle Bot-Nachrichten im News-Kanal löschen"
+                )},
+            )
+            continue
+
         # ── !clean codes ──────────────────────────────────────────────────
         if content_lower == "!clean codes":
             await clean_lobby_codes(session)
@@ -317,7 +329,7 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
         if content_lower.startswith("!set"):
             parts = content.split(maxsplit=2)
             if len(parts) == 1:
-                # No parameter: list all var_* with current values
+                # !set ohne Parameter: alle Einstellungen auflisten
                 lines = ["**Aktuelle Einstellungen:**"]
                 for vk in VAR_KEYS:
                     lines.append(f"`{vk[4:]}` = `{state.get(vk, '–')}`")
@@ -325,7 +337,14 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
                     session, f"/channels/{CHAN_ORDERS}/messages",
                     DISCORD_TOKEN_APOLLOGRABBER, {"content": "\n".join(lines)},
                 )
-            elif len(parts) >= 3:
+            elif len(parts) == 2:
+                # !set PARAM ohne Wert
+                await discord_post(
+                    session, f"/channels/{CHAN_ORDERS}/messages",
+                    DISCORD_TOKEN_APOLLOGRABBER,
+                    {"content": f"❌ Kein Wert angegeben. Verwendung: `!set {parts[1].upper()} <Wert>`"},
+                )
+            else:
                 param   = parts[1].upper()
                 val_raw = parts[2].strip()
                 var_key = f"var_{param}"
@@ -333,7 +352,7 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
                     await discord_post(
                         session, f"/channels/{CHAN_ORDERS}/messages",
                         DISCORD_TOKEN_APOLLOGRABBER,
-                        {"content": f"❌ Unbekannter Parameter: {param}"},
+                        {"content": f"❌ Unbekannter Parameter: `{param}`"},
                     )
                     continue
                 err = _validate_var(param, val_raw)
@@ -346,10 +365,15 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
                 else:
                     state[var_key] = _coerce_var(var_key, val_raw)
                     save_state()
-                    log_line = f"{ts} ⚠️ Wert {param} geändert durch {username}: {val_raw}"
+                    log_line = f"{ts} ⚠️ {param} geändert durch {username}: {val_raw}"
                     append_event_log(log_line)
                     _rebuild_discord_log(grids)
                     await _refresh_chan_log(session)
+                    await discord_post(
+                        session, f"/channels/{CHAN_ORDERS}/messages",
+                        DISCORD_TOKEN_APOLLOGRABBER,
+                        {"content": f"✅ `{param}` gesetzt auf `{val_raw}`"},
+                    )
             continue
 
         # ── !grids=x ──────────────────────────────────────────────────────

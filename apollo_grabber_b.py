@@ -477,16 +477,9 @@ def build_log_payload(grids: int) -> dict:
     Build the full Discord message payload for CHAN_LOG.
 
     Structure:
-      <header text>          ← plain content above embed
-      [embed: log list]      ← embed with the An-/Abmeldungs-Log
-      <footer text>          ← plain content below (Stand / Sync)
-
-    Discord does not allow text both above and below an embed in one message,
-    so Stand/Sync go into the embed footer field instead.
-
-    Layout:
-      content  = "<emoji>\\n**<title>**\\n<event_datetime>\\nFahrer: X | Grids: Y"
-      embed    = { description: <log lines>, footer: { text: "Stand: … | Sync: …" } }
+      content    : status line (emoji, title, date, driver/grid count)
+      embeds[0]  : log list with colored left border
+      embeds[1]  : Stand / Sync (small embed below the log)
     """
     emoji        = _status_emoji(grids)
     title        = state.get("event_title", "–")
@@ -496,13 +489,15 @@ def build_log_payload(grids: int) -> dict:
     last_sync    = _berlin_ts(state.get("last_sync_make", ""))
 
     content = (
-        f"{emoji}\n"
-        f"**{title}**\n"
-        f"{ev_dt}\n"
-        f"Fahrer: {driver_count} | Grids: {grids}"
+        f"{emoji} **{title}**\n"
+        f"{ev_dt} | Fahrer: {driver_count} | Grids: {grids}"
     )
 
-    # Embed description: the log list, line-based truncation to fit 4096 chars
+    # Colored left border matches current status
+    color_map = {"🟢": 0x57F287, "🟡": 0xFEE75C, "🔴": 0xED4245}
+    color = color_map.get(emoji, 0x5865F2)
+
+    # Log embed – line-based truncation to 4096 chars
     raw_log = read_discord_log()
     max_desc = 4096
     if len(raw_log) > max_desc:
@@ -511,12 +506,18 @@ def build_log_payload(grids: int) -> dict:
             lines.pop(0)
         raw_log = "[...]\n" + "\n".join(lines)
 
-    embed = {
+    log_embed = {
         "description": raw_log or "–",
-        "footer": {"text": f"Stand: {stand} | Sync: {last_sync}"},
+        "color": color,
     }
 
-    return {"content": content, "embeds": [embed]}
+    # Stand/Sync as a minimal second embed directly below the log
+    footer_embed = {
+        "description": f"Stand: {stand} | Sync: {last_sync}",
+        "color": color,
+    }
+
+    return {"content": content, "embeds": [log_embed, footer_embed]}
 
 
 async def post_or_update_log(session: aiohttp.ClientSession, payload: dict) -> None:

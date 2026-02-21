@@ -361,6 +361,13 @@ def health():
     return "Apollo Grabber running", 200
 
 
+@flask_app.route("/dashboard")
+def dashboard():
+    from apollo_grabber_b import build_html_dashboard
+    grids = state.get("last_grid_count", 0)
+    return build_html_dashboard(grids), 200
+
+
 def start_flask() -> None:
     port = int(os.environ.get("PORT", 8080))
     flask_app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)

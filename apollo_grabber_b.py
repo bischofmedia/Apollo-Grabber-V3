@@ -517,8 +517,17 @@ async def post_or_update_log(
             return
         log.warning("PATCH fehlgeschlagen – falle auf Neu-Post zurück.")
 
-    # Fallback / Scenario A: delete own messages, post fresh
-    await delete_all_bot_messages(session, CHAN_LOG, DISCORD_TOKEN_APOLLOGRABBER, bot_user_id)
+    # Fallback: delete all own messages EXCEPT the known log_id, then post fresh.
+    # log_id is protected here to avoid a delete-then-404 loop where message_exists()
+    # transiently returns False for a recently created message.
+    all_msgs = await get_channel_messages(session, CHAN_LOG, DISCORD_TOKEN_APOLLOGRABBER)
+    for msg in all_msgs:
+        if msg.get("author", {}).get("id") == bot_user_id and msg["id"] != log_id:
+            await discord_delete(
+                session,
+                f"/channels/{CHAN_LOG}/messages/{msg['id']}",
+                DISCORD_TOKEN_APOLLOGRABBER,
+            )
     msg = await discord_post(
         session,
         f"/channels/{CHAN_LOG}/messages",

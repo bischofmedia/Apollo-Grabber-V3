@@ -458,72 +458,89 @@ def _status_emoji(grids: int) -> str:
     return "🟡"
 
 
-def build_log_post(grids: int) -> str:
+def _berlin_ts(iso_str: str) -> str:
+    """Convert a UTC ISO string to 'WD hh:mm' in Berlin time."""
+    if not iso_str:
+        return "–"
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        dt = datetime.fromisoformat(iso_str).astimezone(ZoneInfo("Europe/Berlin"))
+        days = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+        return f"{days[dt.weekday()]} {dt.strftime('%H:%M')}"
+    except Exception:
+        return iso_str
+
+
+def build_log_payload(grids: int) -> dict:
     """
-    Compose the full Discord CHAN_LOG post.
-    FIX #4: Log truncation is line-based, not character-based.
-    Stand and Sync timestamps are both shown in Berlin time.
+    Build the full Discord message payload for CHAN_LOG.
+
+    Structure:
+      <header text>          ← plain content above embed
+      [embed: log list]      ← embed with the An-/Abmeldungs-Log
+      <footer text>          ← plain content below (Stand / Sync)
+
+    Discord does not allow text both above and below an embed in one message,
+    so Stand/Sync go into the embed footer field instead.
+
+    Layout:
+      content  = "<emoji>\\n**<title>**\\n<event_datetime>\\nFahrer: X | Grids: Y"
+      embed    = { description: <log lines>, footer: { text: "Stand: … | Sync: …" } }
     """
-    emoji = _status_emoji(grids)
-    title = state.get("event_title", "–")
-    ev_dt = state.get("event_datetime", "–")
+    emoji        = _status_emoji(grids)
+    title        = state.get("event_title", "–")
+    ev_dt        = state.get("event_datetime", "–")
     driver_count = len(state.get("drivers", []))
-    stand = ts_str()
+    stand        = ts_str()
+    last_sync    = _berlin_ts(state.get("last_sync_make", ""))
 
-    # Convert last_sync_make (UTC ISO string) to Berlin time for display
-    raw_sync = state.get("last_sync_make", "")
-    if raw_sync:
-        try:
-            from datetime import datetime, timezone
-            from zoneinfo import ZoneInfo
-            sync_dt = datetime.fromisoformat(raw_sync).astimezone(ZoneInfo("Europe/Berlin"))
-            days = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
-            last_sync = f"{days[sync_dt.weekday()]} {sync_dt.strftime('%H:%M')}"
-        except Exception:
-            last_sync = raw_sync
-    else:
-        last_sync = "–"
-
-    header = (
+    content = (
         f"{emoji}\n"
         f"**{title}**\n"
         f"{ev_dt}\n"
-        f"Fahrer: {driver_count} | Grids: {grids}\n\n"
+        f"Fahrer: {driver_count} | Grids: {grids}"
     )
-    footer = f"\nStand: {stand}\nSync: {last_sync}"
-    max_log_chars = 2000 - len(header) - len(footer) - 10
 
+    # Embed description: the log list, line-based truncation to fit 4096 chars
     raw_log = read_discord_log()
-
-    # FIX #4: line-based truncation
-    if len(raw_log) > max_log_chars:
+    max_desc = 4096
+    if len(raw_log) > max_desc:
         lines = raw_log.splitlines()
-        while lines and len("\n".join(lines)) > max_log_chars - len("[...]\n"):
+        while lines and len("\n".join(lines)) > max_desc - len("[...]\n"):
             lines.pop(0)
         raw_log = "[...]\n" + "\n".join(lines)
 
-    return header + raw_log + footer
+    embed = {
+        "description": raw_log or "–",
+        "footer": {"text": f"Stand: {stand} | Sync: {last_sync}"},
+    }
+
+    return {"content": content, "embeds": [embed]}
 
 
-async def post_or_update_log(
-    session: aiohttp.ClientSession,
-    content: str,
-) -> None:
+async def post_or_update_log(session: aiohttp.ClientSession, payload: dict) -> None:
     """
-    Send or update the log message in CHAN_LOG.
-    - If log_id is set: always try PATCH first.
-    - If PATCH fails or log_id is empty: POST a new message, store new log_id.
-    - Never deletes anything here. CHAN_LOG cleanup happens only on new event.
+    Update the log in CHAN_LOG:
+    1. Fetch channel history, find the oldest message posted by a bot (our bot).
+    2. PATCH it with the new payload.
+    3. If no own post exists (or PATCH fails): POST fresh.
+    Never deletes – cleanup is handled exclusively by clear_chan_log().
     """
-    log_id = state.get("log_id", "")
-    if log_id:
+    messages = await get_channel_messages(session, CHAN_LOG, DISCORD_TOKEN_APOLLOGRABBER)
+    own_msgs = [m for m in messages if m.get("author", {}).get("bot") is True]
+
+    if own_msgs:
+        target = min(own_msgs, key=lambda m: int(m["id"]))
         result = await discord_patch(
             session,
-            f"/channels/{CHAN_LOG}/messages/{log_id}",
+            f"/channels/{CHAN_LOG}/messages/{target['id']}",
             DISCORD_TOKEN_APOLLOGRABBER,
-            {"content": content},
+            payload,
         )
         if result:
+            state["log_id"] = target["id"]
+            save_state()
             return
         log.warning("PATCH fehlgeschlagen – poste neu.")
 
@@ -531,7 +548,7 @@ async def post_or_update_log(
         session,
         f"/channels/{CHAN_LOG}/messages",
         DISCORD_TOKEN_APOLLOGRABBER,
-        {"content": content},
+        payload,
     )
     if msg:
         state["log_id"] = msg["id"]

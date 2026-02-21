@@ -25,7 +25,7 @@ from apollo_grabber_a import (
     ts_str, write_discord_log, write_anmeldungen, cfg, _coerce_var,
 )
 from apollo_grabber_b import (
-    build_discord_log, build_html_dashboard, build_log_post,
+    build_discord_log, build_html_dashboard, build_log_payload,
     calculate_grids, check_extra_grid, clean_lobby_codes, clear_chan_log,
     classify_drivers, delete_all_bot_messages, delete_all_messages,
     discord_delete, discord_get, discord_patch, discord_post,
@@ -174,10 +174,10 @@ def _rebuild_discord_log(grids: int) -> None:
 
 
 async def _refresh_chan_log(session: aiohttp.ClientSession) -> None:
-    """Push the current log post to CHAN_LOG (patch or new post)."""
+    """Push the current log post to CHAN_LOG (patch oldest own post, or new post)."""
     grids = int(state.get("last_grid_count", 0))
-    content = build_log_post(grids)
-    await post_or_update_log(session, content)
+    payload = build_log_payload(grids)
+    await post_or_update_log(session, payload)
 
 
 # ─────────────────────────────────────────────

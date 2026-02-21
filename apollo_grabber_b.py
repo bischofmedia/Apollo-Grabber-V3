@@ -61,7 +61,8 @@ async def discord_patch(session: aiohttp.ClientSession, path: str, token: str, p
         async with session.patch(url, headers=_auth(token), json=payload) as r:
             if r.status == 200:
                 return await r.json()
-            log.warning(f"PATCH {path} -> {r.status}")
+            text = await r.text()
+            log.warning(f"PATCH {path} -> {r.status}: {text[:200]}")
             return None
     except Exception as e:
         log.error(f"discord_patch {path}: {e}")
@@ -453,6 +454,9 @@ def _status_emoji(grids: int) -> str:
     driver_count = len(state.get("drivers", []))
     if registration_end_passed():
         return "🔴"
+    locked = state.get("sunday_lock") or state.get("man_lock")
+    if locked:
+        return "🔒"
     if driver_count < capacity:
         return "🟢"
     return "🟡"
@@ -537,7 +541,7 @@ async def post_or_update_log(session: aiohttp.ClientSession, payload: dict) -> N
             state["log_id"] = target["id"]
             save_state()
             return
-        log.warning("PATCH fehlgeschlagen – poste neu.")
+        log.debug("PATCH fehlgeschlagen – poste neu (Fallback).")
 
     msg = await discord_post(
         session,

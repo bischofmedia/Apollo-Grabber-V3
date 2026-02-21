@@ -520,7 +520,7 @@ def build_log_payload(grids: int) -> dict:
         raw_log = "[...]\n" + "\n".join(lines)
 
     log_embed = {
-        "description": raw_log or "–",
+        "description": f"```\n{raw_log or '–'}\n```",
     }
 
     # Stand/Sync as a minimal second embed directly below the log

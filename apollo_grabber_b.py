@@ -492,9 +492,12 @@ def build_log_payload(grids: int) -> dict:
     stand        = ts_str()
     last_sync    = _berlin_ts(state.get("last_sync_make", ""))
 
+    locked = state.get("sunday_lock") or state.get("man_lock")
+    lock_symbol = " 🔒" if locked else ""
+
     content = (
         f"{emoji} **{title}**\n"
-        f"{ev_dt} | Fahrer: {driver_count} | Grids: {grids}"
+        f"{ev_dt} | Fahrer: {driver_count} | Grids: {grids}{lock_symbol}"
     )
 
     # Log embed – line-based truncation to 4096 chars
@@ -521,16 +524,27 @@ def build_log_payload(grids: int) -> dict:
 async def post_or_update_log(session: aiohttp.ClientSession, payload: dict) -> None:
     """
     Update the log in CHAN_LOG:
-    1. Fetch channel history, find the oldest message posted by a bot (our bot).
+    1. Fetch channel history, find the oldest message that carries our log embed
+       (identified by having embeds with 2 entries – log + footer).
     2. PATCH it with the new payload.
-    3. If no own post exists (or PATCH fails): POST fresh.
+    3. If no matching post exists (or PATCH fails): POST fresh.
     Never deletes – cleanup is handled exclusively by clear_chan_log().
     """
     messages = await get_channel_messages(session, CHAN_LOG, DISCORD_TOKEN_APOLLOGRABBER)
-    own_msgs = [m for m in messages if m.get("author", {}).get("bot") is True]
 
-    if own_msgs:
-        target = min(own_msgs, key=lambda m: int(m["id"]))
+    # Only consider messages that look like our log post:
+    # - posted by a bot
+    # - has exactly 2 embeds (log embed + footer embed)
+    # This protects command response messages from being overwritten.
+    log_msgs = [
+        m for m in messages
+        if m.get("author", {}).get("bot") is True
+        and len(m.get("embeds", [])) == 2
+    ]
+
+    if log_msgs:
+        target = min(log_msgs, key=lambda m: int(m["id"]))
+        log.debug(f"PATCH Log-Post {target['id']}")
         result = await discord_patch(
             session,
             f"/channels/{CHAN_LOG}/messages/{target['id']}",
@@ -543,6 +557,7 @@ async def post_or_update_log(session: aiohttp.ClientSession, payload: dict) -> N
             return
         log.debug("PATCH fehlgeschlagen – poste neu (Fallback).")
 
+    log.info("Kein Log-Post gefunden – poste neu.")
     msg = await discord_post(
         session,
         f"/channels/{CHAN_LOG}/messages",
@@ -552,6 +567,7 @@ async def post_or_update_log(session: aiohttp.ClientSession, payload: dict) -> N
     if msg:
         state["log_id"] = msg["id"]
         save_state()
+        log.info(f"Log-Post erstellt: {msg['id']}")
 
 
 # ─────────────────────────────────────────────

@@ -329,13 +329,17 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
         if content_lower.startswith("!set"):
             parts = content.split(maxsplit=2)
             if len(parts) == 1:
-                # !set ohne Parameter: alle Einstellungen auflisten
-                lines = ["**Aktuelle Einstellungen:**"]
+                # !set ohne Parameter: alle Einstellungen als Embed auflisten
+                lines = []
                 for vk in VAR_KEYS:
-                    lines.append(f"`{vk[4:]}` = `{state.get(vk, '–')}`")
+                    val = state.get(vk)
+                    if val is None:
+                        val = DEFAULT_STATE.get(vk, '–')
+                    lines.append(f"`{vk[4:]}` = `{val}`")
                 await discord_post(
                     session, f"/channels/{CHAN_ORDERS}/messages",
-                    DISCORD_TOKEN_APOLLOGRABBER, {"content": "\n".join(lines)},
+                    DISCORD_TOKEN_APOLLOGRABBER,
+                    {"content": "**Aktuelle Einstellungen:**", "embeds": [{"description": "\n".join(lines)}]},
                 )
             elif len(parts) == 2:
                 # !set PARAM ohne Wert
@@ -381,21 +385,48 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
         if m:
             x = int(m.group(1))
             if x == 0:
-                state["man_lock"]   = False
-                state["manual_grids"] = None
+                state["man_lock"]         = False
+                state["manual_grids"]     = None
                 state["grid_lock_override"] = True
                 new_g = recalculate_grids(len(state.get("drivers", [])))
-                state["last_grid_count"] = new_g
+                state["last_grid_count"]  = new_g
             else:
-                x = min(x, MAX_GRIDS)
+                new_g = min(x, MAX_GRIDS)
                 state["man_lock"]         = True
-                state["manual_grids"]     = x
-                state["last_grid_count"]  = x
+                state["manual_grids"]     = new_g
+                state["last_grid_count"]  = new_g
+
+            # Recalculate driver status and detect waitlist/moveup changes
+            current_drivers = list(state.get("drivers", []))
+            old_status      = dict(state.get("driver_status", {}))
+            new_status      = classify_drivers(current_drivers, new_g)
+            state["driver_status"] = new_status
+
+            newly_waitlisted = [
+                n for n, s in new_status.items()
+                if s == "waitlist" and old_status.get(n) == "grid"
+            ]
+            newly_moved_up = [
+                n for n, s in new_status.items()
+                if s == "grid" and old_status.get(n) == "waitlist"
+            ]
+
+            # Log individual status changes
+            for n in newly_waitlisted:
+                append_event_log(f"{ts} 🟡 {n}")
+            for n in newly_moved_up:
+                append_event_log(f"{ts} 🟢 {n}")
+
             save_state()
-            log_line = f"{ts} 🔒 Grids auf {x} gesetzt durch {username}"
+            log_line = f"{ts} 🔒 Grids auf {new_g} gesetzt durch {username}"
             append_event_log(log_line)
-            _rebuild_discord_log(int(state.get("last_grid_count", 0)))
+            _rebuild_discord_log(new_g)
             await _refresh_chan_log(session)
+
+            if newly_waitlisted:
+                await send_waitlist_msg(session, newly_waitlisted)
+            if newly_moved_up:
+                await send_moved_up_msg(session, newly_moved_up)
             continue
 
 

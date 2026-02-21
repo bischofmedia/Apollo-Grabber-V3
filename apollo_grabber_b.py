@@ -510,19 +510,18 @@ def build_log_payload(grids: int) -> dict:
         f"{ev_dt} | Fahrer: {driver_count} | Grids: {grids}{lock_symbol}"
     )
 
-    # Log embed – quote-block format, line-based truncation to 4096 chars
+    # Log embed – codeblock, line-based truncation to 4096 chars
     raw_log = read_discord_log()
-    # Prefix each line with "> " for Discord quote-block rendering
-    quoted_log = "\n".join(f"> {line}" for line in raw_log.splitlines()) if raw_log else "> –"
-    max_desc = 4096
-    if len(quoted_log) > max_desc:
+    wrapper_overhead = len("```\n") + len("\n```")
+    max_desc = 4096 - wrapper_overhead
+    if len(raw_log) > max_desc:
         lines = raw_log.splitlines()
-        while lines and len("\n".join(f"> {l}" for l in lines)) > max_desc - len("> [...]\n"):
+        while lines and len("\n".join(lines)) > max_desc - len("[...]\n"):
             lines.pop(0)
-        quoted_log = "> [...]\n" + "\n".join(f"> {l}" for l in lines)
+        raw_log = "[...]\n" + "\n".join(lines)
 
     log_embed = {
-        "description": quoted_log,
+        "description": f"```\n{raw_log or '–'}\n```",
     }
 
     footer_embed = {

@@ -454,7 +454,10 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
             ]
 
             # 1. Command entry FIRST
-            append_event_log(f"{ts} 🔒 Grids auf {new_g} gesetzt durch {username}")
+            if x == 0:
+                append_event_log(f"{ts} 🔓 Grid-Automatik reaktiviert durch {username}")
+            else:
+                append_event_log(f"{ts} 🔒 Grids auf {new_g} gesetzt durch {username}")
 
             # 2. Status changes AFTER the command entry
             for n in newly_moved_up:

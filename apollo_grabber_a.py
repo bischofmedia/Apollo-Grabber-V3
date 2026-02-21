@@ -357,16 +357,17 @@ def is_sunday_lock_time() -> bool:
 flask_app = Flask("ApolloGrabberHealth")
 
 
-@flask_app.route("/health")
-def health():
-    return "Apollo Grabber running", 200
-
-
+@flask_app.route("/")
 @flask_app.route("/dashboard")
 def dashboard():
     from apollo_grabber_b import build_html_dashboard
     grids = state.get("last_grid_count", 0)
     return build_html_dashboard(grids), 200
+
+
+@flask_app.route("/health")
+def health():
+    return "Apollo Grabber running", 200
 
 
 def start_flask() -> None:

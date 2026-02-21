@@ -399,45 +399,58 @@ def build_clean_log(grids: int) -> str:
     Build a compacted log for !clean log:
     - All system lines are removed
     - For each driver only their CURRENT status is kept (from state["driver_status"])
-    - Each driver appears exactly once with their current emoji
-    - Drivers with status 'removed' (not in driver_status) get 🔴
+    - Each driver appears exactly once with the timestamp of their last status line
     - A single system line ⚙️ Clean Log is prepended with current timestamp
     """
     current_status = state.get("driver_status", {})
-    # Collect all known drivers from event_log to preserve ordering
+
+    CIRCLE_EMOJIS = ["🟢", "🟡", "🔴"]
+
+    def _extract_name_and_ts(line: str):
+        """Return (timestamp_str, name) from a status line, or (None, None)."""
+        parts = line.split()
+        if len(parts) < 3:
+            return None, None
+        try:
+            last_emoji_idx = max(
+                i for i, p in enumerate(parts)
+                if any(e in p for e in CIRCLE_EMOJIS)
+            )
+            name = " ".join(parts[last_emoji_idx + 1:]).strip()
+            # Timestamp is first two tokens: "Mo 21:05"
+            ts = f"{parts[0]} {parts[1]}" if len(parts) >= 2 else ""
+            return ts, name
+        except (ValueError, IndexError):
+            return None, None
+
+    # Walk event_log: track first occurrence order and last known timestamp per driver
     seen: list = []
     seen_set: set = set()
-    for line in read_event_log().splitlines():
-        # Extract driver name from any status line (contains a circle emoji)
-        for emoji in ["🟢", "🟡", "🔴"]:
-            if emoji in line:
-                parts = line.split()
-                # Name is everything after the last emoji token
-                # Format: "WD hh:mm EMOJI Name" or "WD hh:mm EMOJI -> EMOJI Name"
-                try:
-                    # Find last emoji index in parts
-                    last_emoji_idx = max(
-                        i for i, p in enumerate(parts)
-                        if any(e in p for e in ["🟢", "🟡", "🔴"])
-                    )
-                    name = " ".join(parts[last_emoji_idx + 1:]).strip()
-                    if name and name not in seen_set:
-                        seen.append(name)
-                        seen_set.add(name)
-                except (ValueError, IndexError):
-                    pass
-                break
+    last_ts: dict = {}  # driver -> most recent timestamp string
 
-    lines = [f"{ts_str()} ⚙️ Clean Log"]
+    for line in read_event_log().splitlines():
+        if not any(e in line for e in CIRCLE_EMOJIS):
+            continue
+        ts_val, name = _extract_name_and_ts(line)
+        if not name:
+            continue
+        if name not in seen_set:
+            seen.append(name)
+            seen_set.add(name)
+        if ts_val:
+            last_ts[name] = ts_val
+
+    fallback_ts = ts_str()
+    lines = [f"{fallback_ts} ⚙️ Clean Log"]
     for name in seen:
+        driver_ts = last_ts.get(name, fallback_ts)
         status = current_status.get(name)
         if status == "grid":
-            lines.append(f"🟢 {name}")
+            lines.append(f"{driver_ts} 🟢 {name}")
         elif status == "waitlist":
-            lines.append(f"🟡 {name}")
+            lines.append(f"{driver_ts} 🟡 {name}")
         else:
-            # Not in current state = cancelled
-            lines.append(f"🔴 {name}")
+            lines.append(f"{driver_ts} 🔴 {name}")
     return "\n".join(lines)
 
 

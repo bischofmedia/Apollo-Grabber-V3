@@ -510,9 +510,14 @@ def build_log_payload(grids: int) -> dict:
         f"{ev_dt} | Fahrer: {driver_count} | Grids: {grids}{lock_symbol}"
     )
 
-    # Log embed – line-based truncation to 4096 chars
+    # Padding line forces Discord to render the codeblock at maximum width.
+    # 65 em-dashes fill the available channel width on desktop.
+    WIDTH_PAD = "─" * 65
+
+    # Log embed – line-based truncation to fit within 4096 chars including backtick wrapper
     raw_log = read_discord_log()
-    max_desc = 4096
+    wrapper_overhead = len("```\n") + len(WIDTH_PAD) + len("\n") + len("\n```")
+    max_desc = 4096 - wrapper_overhead
     if len(raw_log) > max_desc:
         lines = raw_log.splitlines()
         while lines and len("\n".join(lines)) > max_desc - len("[...]\n"):
@@ -520,7 +525,7 @@ def build_log_payload(grids: int) -> dict:
         raw_log = "[...]\n" + "\n".join(lines)
 
     log_embed = {
-        "description": f"```\n{raw_log or '–'}\n```",
+        "description": f"```\n{WIDTH_PAD}\n{raw_log or '–'}\n```",
     }
 
     # Stand/Sync as a minimal second embed directly below the log

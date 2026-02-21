@@ -25,8 +25,8 @@ from apollo_grabber_a import (
     ts_str, write_discord_log, write_anmeldungen, cfg, _coerce_var,
 )
 from apollo_grabber_b import (
-    bootstrap_log_placeholder, build_discord_log, build_html_dashboard,
-    build_log_post, calculate_grids, check_extra_grid, clean_lobby_codes,
+    build_discord_log, build_html_dashboard, build_log_post,
+    calculate_grids, check_extra_grid, clean_lobby_codes, clear_chan_log,
     classify_drivers, delete_all_bot_messages, delete_all_messages,
     discord_delete, discord_get, discord_patch, discord_post,
     find_apollo_message, get_bot_user_id, get_channel_messages,
@@ -173,11 +173,11 @@ def _rebuild_discord_log(grids: int) -> None:
     write_discord_log(build_discord_log(grids))
 
 
-async def _refresh_chan_log(session: aiohttp.ClientSession, bot_user_id: str) -> None:
+async def _refresh_chan_log(session: aiohttp.ClientSession) -> None:
     """Push the current log post to CHAN_LOG (patch or new post)."""
     grids = int(state.get("last_grid_count", 0))
     content = build_log_post(grids)
-    await post_or_update_log(session, content, bot_user_id)
+    await post_or_update_log(session, content)
 
 
 # ─────────────────────────────────────────────
@@ -269,7 +269,7 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
             log_line = f"{ts} ⚙️ Lobby-Bereinigung durch {username}"
             append_event_log(log_line)
             _rebuild_discord_log(grids)
-            await _refresh_chan_log(session, bot_user_id)
+            await _refresh_chan_log(session)
             continue
 
         # ── !clean log ────────────────────────────────────────────────────
@@ -278,7 +278,7 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
             log_line = f"{ts} ⚠️ Cleanlog durch {username}"
             append_event_log(log_line)
             _rebuild_discord_log(grids)
-            await _refresh_chan_log(session, bot_user_id)
+            await _refresh_chan_log(session)
             continue
 
         # ── !clean news ───────────────────────────────────────────────────
@@ -290,7 +290,7 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
                 log_line = f"{ts} ⚙️ News-Bereinigung durch {username}"
                 append_event_log(log_line)
                 _rebuild_discord_log(grids)
-                await _refresh_chan_log(session, bot_user_id)
+                await _refresh_chan_log(session)
             continue
 
         # ── !set ──────────────────────────────────────────────────────────
@@ -329,7 +329,7 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
                     log_line = f"{ts} ⚠️ Wert {param} geändert durch {username}: {val_raw}"
                     append_event_log(log_line)
                     _rebuild_discord_log(grids)
-                    await _refresh_chan_log(session, bot_user_id)
+                    await _refresh_chan_log(session)
             continue
 
         # ── !grids=x ──────────────────────────────────────────────────────
@@ -351,7 +351,7 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
             log_line = f"{ts} 🔒 Grids auf {x} gesetzt durch {username}"
             append_event_log(log_line)
             _rebuild_discord_log(int(state.get("last_grid_count", 0)))
-            await _refresh_chan_log(session, bot_user_id)
+            await _refresh_chan_log(session)
             continue
 
 
@@ -364,7 +364,8 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
 async def bootstrap(session: aiohttp.ClientSession) -> None:
     """
     Run once when no state.json existed at startup (fresh Render deploy).
-    state is already populated with defaults from load_state() in __main__.
+    Clears data files and CHAN_LOG. No placeholder post — the first real
+    pipeline run will post the log when the Apollo event is found.
     """
     log.info("Bootstrap: Erstinitialisierung …")
     bot_user_id = await get_bot_user_id(session, DISCORD_TOKEN_APOLLOGRABBER)
@@ -373,8 +374,8 @@ async def bootstrap(session: aiohttp.ClientSession) -> None:
     for fp in (EVENT_LOG_FILE, DISCORD_LOG_FILE, ANMELDUNGEN_FILE):
         fp.write_text("", encoding="utf-8")
 
-    # 2. Post placeholder in CHAN_LOG, store log_id
-    await bootstrap_log_placeholder(session, bot_user_id)
+    # 2. Clear CHAN_LOG — no placeholder, log_id reset to ""
+    await clear_chan_log(session, bot_user_id)
 
     # 3. Mark event_id as unknown
     state["event_id"] = "0"
@@ -424,13 +425,30 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
         # Remember whether a real previous event existed (not a fresh deploy sentinel)
         had_previous_event = event_id != "0"
 
-        # Delete old Apollo event post if enabled (Ausnahme der Bot-eigene-Nachrichten-Regel)
+        # Delete old Apollo event post and its reminder thread if enabled
         if int(cfg("ENABLE_DELETE_OLD_EVENT")) and event_id and event_id != "0":
+            # Delete the event message itself
             await discord_delete(
                 session,
                 f"/channels/{CHAN_APOLLO}/messages/{event_id}",
                 DISCORD_TOKEN_APOLLOGRABBER,
             )
+            # Delete any remaining Apollo messages in CHAN_APOLLO that are not
+            # the new event – this covers reminder thread-starter posts which
+            # Apollo creates as separate messages with a 'thread' object.
+            # After deleting the event embed, any leftover Apollo post in the
+            # channel is either a thread or a stale post – both should go.
+            leftover_msgs = await get_channel_messages(
+                session, CHAN_APOLLO, DISCORD_TOKEN_APOLLOGRABBER
+            )
+            for lm in leftover_msgs:
+                if (lm.get("author", {}).get("id") == DISCORD_ID_APOLLO
+                        and lm["id"] != new_id):
+                    await discord_delete(
+                        session,
+                        f"/channels/{CHAN_APOLLO}/messages/{lm['id']}",
+                        DISCORD_TOKEN_APOLLOGRABBER,
+                    )
 
         # Reset event-level state
         state["event_id"]   = new_id
@@ -454,16 +472,8 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
         # Lobby-code cleanup
         await clean_lobby_codes(session)
 
-        # Delete all own CHAN_LOG messages except the persistent log_id post
-        log_id = state.get("log_id", "")
-        all_log_msgs = await get_channel_messages(session, CHAN_LOG, DISCORD_TOKEN_APOLLOGRABBER)
-        for msg in all_log_msgs:
-            if msg.get("author", {}).get("id") == bot_user_id and msg["id"] != log_id:
-                await discord_delete(
-                    session,
-                    f"/channels/{CHAN_LOG}/messages/{msg['id']}",
-                    DISCORD_TOKEN_APOLLOGRABBER,
-                )
+        # Clear CHAN_LOG – delete all own messages, reset log_id
+        await clear_chan_log(session, bot_user_id)
 
         append_event_log("New Event.")
         save_state()
@@ -558,7 +568,7 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
         save_state()
 
     # ── 6. Discord CHAN_LOG update ────────────────────────────────────────
-    await _refresh_chan_log(session, bot_user_id)
+    await _refresh_chan_log(session)
 
     # ── 7. Command scan ───────────────────────────────────────────────────
     await handle_commands(session, bot_user_id)

@@ -141,8 +141,14 @@ async def message_exists(
     message_id: str,
     token: str,
 ) -> bool:
-    result = await discord_get(session, f"/channels/{channel_id}/messages/{message_id}", token)
-    return result is not None
+    """
+    Check whether a message still exists in a channel.
+    Uses channel history search instead of the direct message endpoint,
+    because Discord's GET /messages/{id} can return 404 for recently posted
+    messages due to propagation delay, even though the message is visible.
+    """
+    messages = await get_channel_messages(session, channel_id, token, limit=50)
+    return any(m["id"] == message_id for m in messages)
 
 
 # ─────────────────────────────────────────────
@@ -502,11 +508,15 @@ def build_log_post(grids: int) -> str:
 async def post_or_update_log(
     session: aiohttp.ClientSession,
     content: str,
-    bot_user_id: str,
 ) -> None:
-    """Send or update the log message in CHAN_LOG (Block 7)."""
+    """
+    Send or update the log message in CHAN_LOG.
+    - If log_id is set: always try PATCH first.
+    - If PATCH fails or log_id is empty: POST a new message, store new log_id.
+    - Never deletes anything here. CHAN_LOG cleanup happens only on new event.
+    """
     log_id = state.get("log_id", "")
-    if log_id and await message_exists(session, CHAN_LOG, log_id, DISCORD_TOKEN_APOLLOGRABBER):
+    if log_id:
         result = await discord_patch(
             session,
             f"/channels/{CHAN_LOG}/messages/{log_id}",
@@ -515,10 +525,8 @@ async def post_or_update_log(
         )
         if result:
             return
-        log.warning("PATCH fehlgeschlagen – falle auf Neu-Post zurück.")
+        log.warning("PATCH fehlgeschlagen – poste neu.")
 
-    # Fallback / Scenario A: delete own messages, post fresh
-    await delete_all_bot_messages(session, CHAN_LOG, DISCORD_TOKEN_APOLLOGRABBER, bot_user_id)
     msg = await discord_post(
         session,
         f"/channels/{CHAN_LOG}/messages",
@@ -587,22 +595,15 @@ async def clean_lobby_codes(session: aiohttp.ClientSession) -> None:
 
 
 # ─────────────────────────────────────────────
-# CHAN_LOG placeholder (Bootstrap)
+# CHAN_LOG cleanup (Bootstrap & new event)
 # ─────────────────────────────────────────────
 
-async def bootstrap_log_placeholder(session: aiohttp.ClientSession, bot_user_id: str) -> None:
-    """Delete all own messages in CHAN_LOG, post 'Log-Platzhalter', store log_id."""
+async def clear_chan_log(session: aiohttp.ClientSession, bot_user_id: str) -> None:
+    """Delete all own messages in CHAN_LOG. Called on bootstrap and new event."""
     await delete_all_bot_messages(session, CHAN_LOG, DISCORD_TOKEN_APOLLOGRABBER, bot_user_id)
-    msg = await discord_post(
-        session,
-        f"/channels/{CHAN_LOG}/messages",
-        DISCORD_TOKEN_APOLLOGRABBER,
-        {"content": "Log-Platzhalter"},
-    )
-    if msg:
-        state["log_id"] = msg["id"]
-        save_state()
-        log.info(f"Log-Platzhalter erstellt: {msg['id']}")
+    state["log_id"] = ""
+    save_state()
+    log.info("CHAN_LOG bereinigt.")
 
 
 # ─────────────────────────────────────────────

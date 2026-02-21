@@ -394,7 +394,7 @@ def build_discord_log(grids: int) -> str:
     return "\n".join(out_lines)
 
 
-def build_clean_log(grids: int) -> str:
+def build_clean_log(grids: int, username: str = "") -> str:
     """
     Build a compacted log for !clean log:
     - All system lines are removed
@@ -441,7 +441,8 @@ def build_clean_log(grids: int) -> str:
             last_ts[name] = ts_val
 
     fallback_ts = ts_str()
-    lines = [f"{fallback_ts} ⚙️ Clean Log"]
+    by = f" by {username}" if username else ""
+    lines = [f"{fallback_ts} ⚙️ Clean Log{by}"]
     for name in seen:
         driver_ts = last_ts.get(name, fallback_ts)
         status = current_status.get(name)

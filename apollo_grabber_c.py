@@ -338,6 +338,7 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
         # ── !clean codes ──────────────────────────────────────────────────
         if content_lower == "!clean codes":
             await clean_lobby_codes(session)
+            await send_to_make(session, "cleancodes")
             log_line = f"{ts} ⚙️ Lobby-Bereinigung durch {username}"
             append_event_log(log_line)
             _rebuild_discord_log(grids)
@@ -346,10 +347,7 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
 
         # ── !clean log ────────────────────────────────────────────────────
         if content_lower == "!clean log":
-            # Rebuild event_log.txt to compacted form, then refresh Discord
-            clean_content = build_clean_log(grids)
-            # Replace event_log.txt with the clean version
-            from apollo_grabber_a import EVENT_LOG_FILE
+            clean_content = build_clean_log(grids, username)
             EVENT_LOG_FILE.write_text(clean_content, encoding="utf-8")
             _rebuild_discord_log(grids)
             await _refresh_chan_log(session)
@@ -500,7 +498,7 @@ async def bootstrap(session: aiohttp.ClientSession) -> None:
     state["registration_end_monday"] = ""
 
     save_state()
-    append_event_log(f"{ts_str()} ⚙️ Systemneustart")
+    append_event_log(f"{ts_str()} ⚙️ Restart Apollo Grabber")
     log.info("Bootstrap abgeschlossen.")
 
 
@@ -579,7 +577,7 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
         state["registration_end_monday"] = ""   # will be set when embed is first parsed
 
         trigger_make = True
-        make_type    = "event_reset"
+        make_type    = "cleancodes" if had_previous_event else "update"
 
         # Clear all log files
         for fp in (EVENT_LOG_FILE, DISCORD_LOG_FILE, ANMELDUNGEN_FILE):
@@ -592,7 +590,7 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
             await clean_lobby_codes(session)
             await clear_chan_log(session, bot_user_id)
 
-        append_event_log(f"{ts_str()} ⚙️ Neues Event")
+        append_event_log(f"{ts_str()} ⚙️ New Event")
         save_state()
 
         # New-event notification – only when a real previous event existed,

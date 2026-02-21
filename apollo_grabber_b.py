@@ -438,7 +438,7 @@ def build_discord_log(grids: int) -> str:
                 out_lines.append(f"  🟡 -> 🟢 {moved_name}{suffix}")
 
         else:
-            # System lines (New Event., Update eingespielt., etc.) – pass through
+            # System lines (⚙️ Systemneustart, ⚙️ Neues Event, etc.) – pass through
             out_lines.append(stripped)
 
     return "\n".join(out_lines)
@@ -493,10 +493,6 @@ def build_log_payload(grids: int) -> dict:
         f"{ev_dt} | Fahrer: {driver_count} | Grids: {grids}"
     )
 
-    # Colored left border matches current status
-    color_map = {"🟢": 0x57F287, "🟡": 0xFEE75C, "🔴": 0xED4245}
-    color = color_map.get(emoji, 0x5865F2)
-
     # Log embed – line-based truncation to 4096 chars
     raw_log = read_discord_log()
     max_desc = 4096
@@ -508,13 +504,11 @@ def build_log_payload(grids: int) -> dict:
 
     log_embed = {
         "description": raw_log or "–",
-        "color": color,
     }
 
     # Stand/Sync as a minimal second embed directly below the log
     footer_embed = {
         "description": f"Stand: {stand} | Sync: {last_sync}",
-        "color": color,
     }
 
     return {"content": content, "embeds": [log_embed, footer_embed]}

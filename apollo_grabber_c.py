@@ -151,11 +151,10 @@ async def send_extra_grid_msg(session: aiohttp.ClientSession) -> None:
 async def send_new_event_msg(session: aiohttp.ClientSession) -> None:
     """
     Post a new-event notification to CHAN_NEWS when a genuinely new Apollo event
-    is detected. NOT sent on restart or fresh deploy (event_id was "0" in those
-    cases, which is the sentinel for 'no previous event known').
-    Controlled by var_SET_MSG_NEW_EVENT_TEXT (1 = on, 0 = off).
+    is detected. NOT sent on restart or fresh deploy (event_id was "0").
+    Controlled by var_SET_NEW_EVENT_MSG (1 = on, 0 = off).
     """
-    if not int(cfg("SET_MSG_NEW_EVENT_TEXT")):
+    if not int(cfg("SET_NEW_EVENT_MSG")):
         return
     de, en = _pick_bilingual(MSG_NEW_EVENT, MSG_NEW_EVENT_EN)
     text = _format_bilingual(de, en)
@@ -190,7 +189,7 @@ def _validate_var(param: str, val: str) -> str | None:
         "ENABLE_EXTRA_GRID", "ENABLE_EXTRA_GRID_MSG", "ENABLE_MOVED_UP_MSG",
         "ENABLE_NEWS_CLEANUP", "ENABLE_SUNDAY_MSG", "ENABLE_WAITLIST_MSG",
         "ENABLE_DELETE_OLD_EVENT", "ENABLE_GRID_FULL_MSG", "SET_MSG_MOVED_UP_TEXT",
-        "SET_MSG_NEW_EVENT_TEXT",
+        "SET_NEW_EVENT_MSG",
     }
     if param in binary:
         if val not in ("0", "1"):
@@ -400,7 +399,7 @@ async def bootstrap(session: aiohttp.ClientSession) -> None:
     state["registration_end_monday"] = ""
 
     save_state()
-    append_event_log("Update eingespielt.")
+    append_event_log(f"{ts_str()} ⚙️ Systemneustart")
     log.info("Bootstrap abgeschlossen.")
 
 
@@ -471,7 +470,8 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
         state["sunday_lock"]  = False
         state["man_lock"]     = False
         state["manual_grids"] = None
-        state["sunday_msg_sent"]   = False
+        state["sunday_msg_sent"]        = False
+        state["registration_end_logged"] = False
         state["driver_status"]     = {}
         state["drivers"]           = []
         state["last_grid_count"]   = 0
@@ -491,7 +491,7 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
             await clean_lobby_codes(session)
             await clear_chan_log(session, bot_user_id)
 
-        append_event_log("New Event.")
+        append_event_log(f"{ts_str()} ⚙️ Neues Event")
         save_state()
 
         # New-event notification – only when a real previous event existed,
@@ -529,6 +529,12 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
     if roster_changed:
         reg_end   = registration_end_passed()
         old_grids = int(state.get("last_grid_count", 0))
+
+        # Write deadline log entry exactly once per event cycle
+        if reg_end and not state.get("registration_end_logged"):
+            append_event_log(f"{ts_str()} ⚙️ Anmeldeschluss – keine weiteren Anmeldungen möglich")
+            state["registration_end_logged"] = True
+            save_state()
 
         # Grid count: recalculate_grids() respects locks and override internally
         new_grids = recalculate_grids(len(new_drivers))

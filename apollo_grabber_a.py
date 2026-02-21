@@ -111,7 +111,7 @@ VAR_KEYS = [
     "var_ENABLE_EXTRA_GRID_MSG",
     "var_ENABLE_GRID_FULL_MSG",
     "var_SET_MSG_MOVED_UP_TEXT",
-    "var_SET_MSG_NEW_EVENT_TEXT",
+    "var_SET_NEW_EVENT_MSG",
 ]
 
 VAR_ENV_MAP = {k: k[4:] for k in VAR_KEYS}  # "var_ENABLE_X" -> "ENABLE_X"
@@ -141,6 +141,7 @@ DEFAULT_STATE: dict = {
     "last_sync_make": "",
     # Triggers
     "sunday_msg_sent": False,
+    "registration_end_logged": False,
     # var_* settings (defaults; overridden by env vars on first run)
     "var_ENABLE_EXTRA_GRID": 0,
     "var_ENABLE_MOVED_UP_MSG": 1,
@@ -155,7 +156,7 @@ DEFAULT_STATE: dict = {
     "var_ENABLE_EXTRA_GRID_MSG": 1,
     "var_ENABLE_GRID_FULL_MSG": 1,
     "var_SET_MSG_MOVED_UP_TEXT": 1,
-    "var_SET_MSG_NEW_EVENT_TEXT": 1,
+    "var_SET_NEW_EVENT_MSG": 1,
 }
 
 # ─────────────────────────────────────────────
@@ -173,7 +174,7 @@ def _coerce_var(var_key: str, raw: str):
         "var_POLL_INTERVAL_SECONDS", "var_ENABLE_DELETE_OLD_EVENT",
         "var_SET_MIN_GRIDS_MSG", "var_ENABLE_EXTRA_GRID_MSG",
         "var_ENABLE_GRID_FULL_MSG", "var_SET_MSG_MOVED_UP_TEXT",
-        "var_SET_MSG_NEW_EVENT_TEXT",
+        "var_SET_NEW_EVENT_MSG",
     }
     if var_key in int_keys:
         try:

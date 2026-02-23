@@ -68,10 +68,11 @@ CHAN_CODES  = _env("CHAN_CODES", "")
 # FIX #5: resolved after CHAN_LOG is set, never evaluated before it
 CHAN_ORDERS = _env("CHAN_ORDERS") or _env("CHAN_LOG", "")
 
-DRIVERS_PER_GRID       = _env_int("DRIVERS_PER_GRID", 15)
-MAX_GRIDS              = _env_int("MAX_GRIDS", 4)
-MAKE_WEBHOOK_URL       = _env("MAKE_WEBHOOK_URL", "")
+DRIVERS_PER_GRID          = _env_int("DRIVERS_PER_GRID", 15)
+MAX_GRIDS                 = _env_int("MAX_GRIDS", 4)
+MAKE_WEBHOOK_URL          = _env("MAKE_WEBHOOK_URL", "")
 CMD_SCAN_INTERVAL_SECONDS = _env_int("CMD_SCAN_INTERVAL_SECONDS", 10)
+ENABLE_MULTILANGUAGE      = _env_int("ENABLE_MULTILANGUAGE", 0)
 
 # Message templates – loaded once from env at import time, never from state
 MSG_HILFETEXT          = _env("MSG_HILFETEXT", "Kein Hilfetext konfiguriert.")

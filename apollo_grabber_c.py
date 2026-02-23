@@ -23,6 +23,7 @@ from apollo_grabber_a import (
     launch_flask_thread, load_state, log, now_berlin, read_event_log,
     registration_end_passed, save_state, set_registration_end_monday, state,
     ts_str, write_discord_log, write_anmeldungen, cfg, _coerce_var,
+    ENABLE_MULTILANGUAGE,
 )
 from apollo_grabber_b import (
     build_clean_log, build_discord_log, build_html_dashboard, build_log_payload,
@@ -65,7 +66,7 @@ def _format_bilingual(de_text: str, en_text: str) -> str:
     parts = []
     if de_text:
         parts.append(f"🇩🇪 {de_text}")
-    if en_text:
+    if en_text and ENABLE_MULTILANGUAGE:
         parts.append(f"🇬🇧 {en_text}")
     return "\n".join(parts)
 
@@ -355,14 +356,13 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
 
         # ── !clean news ───────────────────────────────────────────────────
         if content_lower == "!clean news":
-            if int(cfg("ENABLE_NEWS_CLEANUP")):
-                await delete_all_bot_messages(
-                    session, CHAN_NEWS, DISCORD_TOKEN_APOLLOGRABBER, bot_user_id,
-                )
-                log_line = f"{ts} ⚙️ News-Bereinigung durch {username}"
-                append_event_log(log_line)
-                _rebuild_discord_log(grids)
-                await _refresh_chan_log(session)
+            await delete_all_bot_messages(
+                session, CHAN_NEWS, DISCORD_TOKEN_APOLLOGRABBER, bot_user_id,
+            )
+            log_line = f"{ts} ⚙️ News-Bereinigung durch {username}"
+            append_event_log(log_line)
+            _rebuild_discord_log(grids)
+            await _refresh_chan_log(session)
             continue
 
         # ── !set ──────────────────────────────────────────────────────────
@@ -498,7 +498,7 @@ async def bootstrap(session: aiohttp.ClientSession) -> None:
     state["registration_end_monday"] = ""
 
     save_state()
-    append_event_log(f"{ts_str()} ⚙️ Restart Apollo Grabber")
+    append_event_log(f"{ts_str()} ⚙️ Systemupdate")
     log.info("Bootstrap abgeschlossen.")
 
 
@@ -589,6 +589,10 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
         if had_previous_event:
             await clean_lobby_codes(session)
             await clear_chan_log(session, bot_user_id)
+            if int(cfg("ENABLE_NEWS_CLEANUP")):
+                await delete_all_bot_messages(
+                    session, CHAN_NEWS, DISCORD_TOKEN_APOLLOGRABBER, bot_user_id,
+                )
 
         append_event_log(f"{ts_str()} ⚙️ New Event")
         save_state()

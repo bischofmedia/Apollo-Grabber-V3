@@ -459,17 +459,32 @@ def build_clean_log(grids: int, username: str = "") -> str:
 # Discord log post builder  (Block 4)
 # ─────────────────────────────────────────────
 
-def _status_emoji(grids: int) -> str:
-    capacity = grid_capacity(grids)
-    driver_count = len(state.get("drivers", []))
+def _registration_status(grids: int) -> tuple[str, str]:
+    """
+    Returns (emoji, label) for the current registration status.
+
+    🟢 Anmeldung offen       – next sign-up goes directly into a grid slot
+    🟡 Anmeldung auf Warteliste – all grids full/locked, deadline not yet reached
+    🔴 Anmeldung gesperrt    – final registration deadline passed
+    """
     if registration_end_passed():
-        return "🔴"
-    locked = state.get("sunday_lock") or state.get("man_lock")
-    if locked:
-        return "🔒"
-    if driver_count < capacity:
-        return "🟢"
-    return "🟡"
+        return "🔴", "Anmeldung gesperrt"
+    capacity     = grid_capacity(grids)
+    driver_count = len(state.get("drivers", []))
+    locked       = state.get("sunday_lock") or state.get("man_lock")
+    max_capacity = grid_capacity(MAX_GRIDS)
+    # Open: free slots still available and not locked beyond max
+    if driver_count < capacity and not locked:
+        return "🟢", "Anmeldung offen"
+    if driver_count < max_capacity and not locked:
+        return "🟢", "Anmeldung offen"
+    return "🟡", "Anmeldung auf Warteliste"
+
+
+def _status_emoji(grids: int) -> str:
+    """Legacy single-emoji accessor (used elsewhere)."""
+    emoji, _ = _registration_status(grids)
+    return emoji
 
 
 def _berlin_ts(iso_str: str) -> str:
@@ -491,11 +506,17 @@ def build_log_payload(grids: int) -> dict:
     Build the full Discord message payload for CHAN_LOG.
 
     Structure:
-      content    : status line (emoji, title, date, driver/grid count)
+      content    : 4-line header + status
       embeds[0]  : log list as codeblock
       embeds[1]  : Stand / Sync footer
+
+    Header lines:
+      1. Registration status (emoji + label)
+      2. Event title (bold)
+      3. Event datetime
+      4. Fahrer | Grids | Lock symbol
     """
-    emoji        = _status_emoji(grids)
+    status_emoji, status_label = _registration_status(grids)
     title        = state.get("event_title", "–")
     ev_dt        = state.get("event_datetime", "–")
     driver_count = len(state.get("drivers", []))
@@ -506,8 +527,10 @@ def build_log_payload(grids: int) -> dict:
     lock_symbol = " 🔒" if locked else ""
 
     content = (
-        f"{emoji} **{title}**\n"
-        f"{ev_dt} | Fahrer: {driver_count} | Grids: {grids}{lock_symbol}"
+        f"{status_emoji} {status_label}\n"
+        f"**{title}**\n"
+        f"{ev_dt}\n"
+        f"Fahrer: {driver_count} | Grids: {grids}{lock_symbol}"
     )
 
     # Log embed – codeblock, line-based truncation to 4096 chars
@@ -651,9 +674,15 @@ async def clear_chan_log(session: aiohttp.ClientSession, bot_user_id: str) -> No
 # ─────────────────────────────────────────────
 
 def build_html_dashboard(grids: int) -> str:
-    title = state.get("event_title", "–")
-    ev_dt = state.get("event_datetime", "–")
+    title        = state.get("event_title", "–")
+    ev_dt        = state.get("event_datetime", "–")
     driver_count = len(state.get("drivers", []))
+    locked       = state.get("sunday_lock") or state.get("man_lock")
+    lock_symbol  = " 🔒" if locked else ""
+    actual_grids = int(state.get("last_grid_count", grids))
+
+    status_emoji, status_label = _registration_status(actual_grids)
+
     discord_log = (
         read_discord_log()
         .replace("&", "&amp;")
@@ -662,18 +691,25 @@ def build_html_dashboard(grids: int) -> str:
     )
     return f"""<!DOCTYPE html>
 <html lang="de">
-<head><meta charset="UTF-8"><title>Apollo Grabber V2</title>
+<head><meta charset="UTF-8"><title>RTC Apollo Grabber</title>
 <style>
-  body {{ background: #111; color: #0f0; font-family: monospace; padding: 20px; }}
-  h1 {{ color: #0ff; }}
-  .info {{ margin-bottom: 10px; }}
-  .log {{ background: #000; color: #0f0; padding: 15px; white-space: pre-wrap; border-radius: 5px; }}
+  body {{ background: #111; color: #eee; font-family: Arial, sans-serif; padding: 24px; max-width: 860px; margin: 0 auto; }}
+  h1 {{ color: #7ec8e3; margin-bottom: 4px; }}
+  .status {{ font-size: 1.1em; margin-bottom: 6px; }}
+  .event-title {{ font-size: 1.3em; font-weight: bold; margin-bottom: 2px; }}
+  .event-dt {{ color: #aaa; margin-bottom: 12px; }}
+  .info {{ color: #ccc; margin-bottom: 16px; }}
+  .log {{ background: #000; color: #0f0; font-family: monospace; padding: 15px; white-space: pre-wrap; border-radius: 6px; }}
+  a {{ color: #7ec8e3; }}
 </style>
 </head>
 <body>
-<h1>Apollo Grabber V2</h1>
-<div class="info">Event: <strong>{title}</strong></div>
-<div class="info">Fahrer: {driver_count} &nbsp;|&nbsp; Grids: {grids} &nbsp;|&nbsp; {ev_dt}</div>
+<h1>RTC Apollo Grabber</h1>
+<div class="status">{status_emoji} {status_label}</div>
+<div class="event-title">{title}</div>
+<div class="event-dt">{ev_dt}</div>
+<div class="info">Fahrer: {driver_count} &nbsp;|&nbsp; Grids: {actual_grids}{lock_symbol}</div>
+<div class="info"><a href="https://cutt.ly/RTC-infos" target="_blank">https://cutt.ly/RTC-infos</a></div>
 <div class="log">{discord_log}</div>
 </body>
 </html>"""

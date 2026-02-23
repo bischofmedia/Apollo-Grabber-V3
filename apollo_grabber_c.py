@@ -497,6 +497,16 @@ async def bootstrap(session: aiohttp.ClientSession) -> None:
     state["log_id"]   = ""
     state["registration_end_monday"] = ""
 
+    # If we're deploying during sunday-lock time, pre-set the lock and mark
+    # sunday_msg_sent=True so the notification is not sent again.
+    # Logic: sunday lock applies Sun >= 18:00 or all day Monday.
+    # A new event starts on Tuesday, so if it's currently lock time we know
+    # the sunday message was already sent (or is irrelevant for this event).
+    if is_sunday_lock_time():
+        state["sunday_lock"]     = True
+        state["sunday_msg_sent"] = True
+        log.info("Bootstrap: Sonntags-Sperre vorgesetzt (kein erneuter Text).")
+
     save_state()
     append_event_log(f"{ts_str()} ⚙️ Systemupdate")
     log.info("Bootstrap abgeschlossen.")
@@ -571,6 +581,7 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
         state["manual_grids"] = None
         state["sunday_msg_sent"]        = False
         state["registration_end_logged"] = False
+        state["ignored_drivers"]   = []
         state["driver_status"]     = {}
         state["drivers"]           = []
         state["last_grid_count"]   = 0
@@ -655,7 +666,12 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
 
         # Accepted drivers = embed list minus any ignored (post-deadline sign-ups).
         # Ignored drivers are visible in Apollo but not part of our state.
-        ignored_set = set(changes.get("ignored", []))
+        # Persist ignored list so next cycle won't re-log them with 🔴🔴.
+        new_ignored = changes.get("ignored", [])
+        existing_ignored = state.get("ignored_drivers", [])
+        all_ignored = list(dict.fromkeys(existing_ignored + new_ignored))  # deduplicated, order preserved
+        state["ignored_drivers"] = all_ignored
+        ignored_set = set(all_ignored)
         accepted_drivers = [d for d in new_drivers if d not in ignored_set]
 
         # Update state with accepted drivers only

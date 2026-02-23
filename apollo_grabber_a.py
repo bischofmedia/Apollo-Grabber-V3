@@ -143,6 +143,7 @@ DEFAULT_STATE: dict = {
     # Triggers
     "sunday_msg_sent": False,
     "registration_end_logged": False,
+    "ignored_drivers": [],
     # var_* settings (defaults; overridden by env vars on first run)
     "var_ENABLE_EXTRA_GRID": 0,
     "var_ENABLE_MOVED_UP_MSG": 1,

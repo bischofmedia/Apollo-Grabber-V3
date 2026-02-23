@@ -344,8 +344,11 @@ def process_driver_changes(
         if name not in old_set:
             # New driver
             if reg_end:
+                # Only log once – if already in state["ignored_drivers"], skip
+                already_ignored = name in state.get("ignored_drivers", [])
                 ignored.append(name)
-                append_event_log(f"{ts_str()} 🔴🔴 {name}")
+                if not already_ignored:
+                    append_event_log(f"{ts_str()} 🔴🔴 {name}")
                 continue
             if cur == "grid":
                 added.append(name)

@@ -579,11 +579,16 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
         state["sunday_lock"]  = False
         state["man_lock"]     = False
         state["manual_grids"] = None
-        state["sunday_msg_sent"]        = False
         state["registration_end_logged"] = False
         state["ignored_drivers"]   = []
         state["driver_status"]     = {}
         state["drivers"]           = []
+        # sunday_msg_sent: only reset for real new events, not on fresh deploy.
+        # On deploy, bootstrap may have pre-set it to True (sunday lock time).
+        if had_previous_event:
+            state["sunday_msg_sent"] = False
+        elif not is_sunday_lock_time():
+            state["sunday_msg_sent"] = False
         state["last_grid_count"]   = 0
         state["registration_end_monday"] = ""   # will be set when embed is first parsed
 

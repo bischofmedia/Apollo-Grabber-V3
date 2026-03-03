@@ -1415,6 +1415,7 @@ KNOWN_COMMANDS = (
     "!help",
     "!clean",
     "!set",
+    "!sync",
     "!grids=",
 )
 
@@ -1503,6 +1504,20 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
             append_event_log(log_line)
             _rebuild_discord_log(grids)
             await _refresh_chan_log(session)
+            continue
+
+        # ── !sync ─────────────────────────────────────────────────────────
+        if content_lower == "!sync":
+            await sync_to_sheets(session, "update")
+            save_state()
+            log_line = f"{ts} ⚙️ Manueller Sheets-Sync durch {username}"
+            append_event_log(log_line)
+            _rebuild_discord_log(grids)
+            await _refresh_chan_log(session)
+            await discord_post(
+                session, f"/channels/{CHAN_ORDERS}/messages",
+                DISCORD_TOKEN_APOLLOGRABBER, {"content": "✅ Google Sheets Sync ausgelöst."},
+            )
             continue
 
         # ── !set ──────────────────────────────────────────────────────────

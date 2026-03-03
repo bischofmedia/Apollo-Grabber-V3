@@ -47,6 +47,11 @@ DISCORD_API = "https://discord.com/api/v10"
 def _env(key: str, default=None) -> str:
     return os.environ.get(key, default)
 
+def _env_msg(key: str, default: str = "") -> str:
+    """Like _env() but converts literal \\n sequences to real newlines (for message templates)."""
+    val = os.environ.get(key, default)
+    return val.replace("\\n", "\n") if val else default
+
 def _env_int(key: str, default: int) -> int:
     try:
         return int(os.environ.get(key, default))
@@ -70,29 +75,30 @@ CHAN_ORDERS = _env("CHAN_ORDERS") or _env("CHAN_LOG", "")
 
 DRIVERS_PER_GRID          = _env_int("DRIVERS_PER_GRID", 15)
 MAX_GRIDS                 = _env_int("MAX_GRIDS", 4)
-MAKE_WEBHOOK_URL          = _env("MAKE_WEBHOOK_URL", "")
+GOOGLE_SHEETS_ID          = _env("GOOGLE_SHEETS_ID", "")
+GOOGLE_CREDENTIALS_FILE   = _env("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 CMD_SCAN_INTERVAL_SECONDS = _env_int("CMD_SCAN_INTERVAL_SECONDS", 10)
 ENABLE_MULTILANGUAGE      = _env_int("ENABLE_MULTILANGUAGE", 0)
 
 # Message templates – loaded once from env at import time, never from state
-MSG_HILFETEXT          = _env("MSG_HILFETEXT", "Kein Hilfetext konfiguriert.")
-MSG_LOBBYCODES         = _env("MSG_LOBBYCODES", "Lobby-Codes")
-MSG_EXTRA_GRID_TEXT    = _env("MSG_EXTRA_GRID_TEXT", "")
-MSG_EXTRA_GRID_TEXT_EN = _env("MSG_EXTRA_GRID_TEXT_EN", "")
-MSG_GRID_FULL_TEXT     = _env("MSG_GRID_FULL_TEXT", "")
-MSG_GRID_FULL_TEXT_EN  = _env("MSG_GRID_FULL_TEXT_EN", "")
-MSG_MOVED_UP_SINGLE    = _env("MSG_MOVED_UP_SINGLE", "")
-MSG_MOVED_UP_SINGLE_EN = _env("MSG_MOVED_UP_SINGLE_EN", "")
-MSG_MOVED_UP_MULTI     = _env("MSG_MOVED_UP_MULTI", "")
-MSG_MOVED_UP_MULTI_EN  = _env("MSG_MOVED_UP_MULTI_EN", "")
-MSG_SUNDAY_TEXT        = _env("MSG_SUNDAY_TEXT", "")
-MSG_SUNDAY_TEXT_EN     = _env("MSG_SUNDAY_TEXT_EN", "")
-MSG_WAITLIST_SINGLE    = _env("MSG_WAITLIST_SINGLE", "")
-MSG_WAITLIST_SINGLE_EN = _env("MSG_WAITLIST_SINGLE_EN", "")
-MSG_WAITLIST_MULTI     = _env("MSG_WAITLIST_MULTI", "")
-MSG_WAITLIST_MULTI_EN  = _env("MSG_WAITLIST_MULTI_EN", "")
-MSG_NEW_EVENT          = _env("MSG_NEW_EVENT", "")
-MSG_NEW_EVENT_EN       = _env("MSG_NEW_EVENT_EN", "")
+MSG_HILFETEXT          = _env_msg("MSG_HILFETEXT", "Kein Hilfetext konfiguriert.")
+MSG_LOBBYCODES         = _env_msg("MSG_LOBBYCODES", "Lobby-Codes")
+MSG_EXTRA_GRID_TEXT    = _env_msg("MSG_EXTRA_GRID_TEXT", "")
+MSG_EXTRA_GRID_TEXT_EN = _env_msg("MSG_EXTRA_GRID_TEXT_EN", "")
+MSG_GRID_FULL_TEXT     = _env_msg("MSG_GRID_FULL_TEXT", "")
+MSG_GRID_FULL_TEXT_EN  = _env_msg("MSG_GRID_FULL_TEXT_EN", "")
+MSG_MOVED_UP_SINGLE    = _env_msg("MSG_MOVED_UP_SINGLE", "")
+MSG_MOVED_UP_SINGLE_EN = _env_msg("MSG_MOVED_UP_SINGLE_EN", "")
+MSG_MOVED_UP_MULTI     = _env_msg("MSG_MOVED_UP_MULTI", "")
+MSG_MOVED_UP_MULTI_EN  = _env_msg("MSG_MOVED_UP_MULTI_EN", "")
+MSG_SUNDAY_TEXT        = _env_msg("MSG_SUNDAY_TEXT", "")
+MSG_SUNDAY_TEXT_EN     = _env_msg("MSG_SUNDAY_TEXT_EN", "")
+MSG_WAITLIST_SINGLE    = _env_msg("MSG_WAITLIST_SINGLE", "")
+MSG_WAITLIST_SINGLE_EN = _env_msg("MSG_WAITLIST_SINGLE_EN", "")
+MSG_WAITLIST_MULTI     = _env_msg("MSG_WAITLIST_MULTI", "")
+MSG_WAITLIST_MULTI_EN  = _env_msg("MSG_WAITLIST_MULTI_EN", "")
+MSG_NEW_EVENT          = _env_msg("MSG_NEW_EVENT", "")
+MSG_NEW_EVENT_EN       = _env_msg("MSG_NEW_EVENT_EN", "")
 
 # ─────────────────────────────────────────────
 # var_* keys – persisted in state.json, changeable via !set
@@ -139,7 +145,7 @@ DEFAULT_STATE: dict = {
     "grid_lock_override": False,
     # Discord
     "log_id": "",
-    "last_sync_make": "",
+    "last_sync_sheets": "",
     # Triggers
     "sunday_msg_sent": False,
     "registration_end_logged": False,
@@ -892,7 +898,7 @@ def build_log_payload(grids: int) -> dict:
     ev_dt        = state.get("event_datetime", "–")
     driver_count = len(state.get("drivers", []))
     stand        = ts_str()
-    last_sync    = _berlin_ts(state.get("last_sync_make", ""))
+    last_sync    = _berlin_ts(state.get("last_sync_sheets", ""))
 
     locked      = state.get("sunday_lock") or state.get("man_lock")
     lock_symbol = " 🔒" if locked else ""
@@ -982,41 +988,86 @@ async def post_or_update_log(session: aiohttp.ClientSession, payload: dict) -> N
 
 
 # ─────────────────────────────────────────────
-# Make.com Webhook  (Block 3)
+# Google Sheets Sync  (Block 3)
+# Ersetzt make.com – schreibt direkt via gspread
+#
+# Spreadsheet-Layout (Sheet "Apollo-Grabber"):
+#   Zeile 1, Spalte B  → Letzte Änderung (Timestamp)
+#   Zeile 1, Spalte D  → Anzahl Grids
+#   Zeile 1, Spalte Q  → Fahrerliste (newline-getrennt)
+#   Zeile 1, Spalte F  → Grid Override (wird nach Update auf "0" zurückgesetzt)
+#
+# Bei event_type == "cleancodes":
+#   Sheet "LobbyCodes", Range A2:C500 → wird geleert
 # ─────────────────────────────────────────────
 
-async def send_to_make(session: aiohttp.ClientSession, event_type: str) -> None:
-    """
-    POST the full payload to MAKE_WEBHOOK_URL.
-    drivers list = raw names from state (>>> stripped, backslashes preserved).
-    """
-    if not MAKE_WEBHOOK_URL:
-        log.warning("MAKE_WEBHOOK_URL nicht gesetzt – übersprungen.")
-        return
-    grids = int(state.get("last_grid_count", 0))
-    sunday_lock = state.get("sunday_lock", False)
-    man_lock = state.get("man_lock", False)
-    grid_status = "locked" if (sunday_lock or man_lock) else "open"
+def _get_gspread_client():
+    """Initialisiert einen gspread-Client mit dem Service-Account aus GOOGLE_CREDENTIALS_FILE."""
+    import gspread
+    from google.oauth2.service_account import Credentials
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+    ]
+    creds = Credentials.from_service_account_file(GOOGLE_CREDENTIALS_FILE, scopes=scopes)
+    return gspread.authorize(creds)
 
-    payload = {
-        "type": event_type,
-        "driver_count": len(state.get("drivers", [])),
-        "drivers": list(state.get("drivers", [])),
-        "grids": grids,
-        "grid_status": grid_status,
-        "history": read_event_log(),
-        "timestamp": iso_now(),
-    }
+
+async def sync_to_sheets(session: aiohttp.ClientSession, event_type: str) -> None:
+    """
+    Schreibt Fahrerdaten direkt in das Google Sheet.
+    Läuft in einem ThreadPoolExecutor, um den asyncio-Loop nicht zu blockieren.
+    """
+    if not GOOGLE_SHEETS_ID:
+        log.warning("GOOGLE_SHEETS_ID nicht gesetzt – Sheet-Sync übersprungen.")
+        return
+
+    grids = int(state.get("last_grid_count", 0))
+    drivers = list(state.get("drivers", []))
+    now_str = datetime.now(BERLIN).strftime("%d.%m.%Y %H:%M")
+
+    def _do_sync():
+        gc = _get_gspread_client()
+        sh = gc.open_by_key(GOOGLE_SHEETS_ID)
+
+        # ── Sheet "Apollo-Grabber", Zeile 1 aktualisieren ──────────────────
+        ws = sh.worksheet("Apollo-Grabber")
+
+        # Spalte B: Timestamp, Spalte D: Grids, Spalte Q: Fahrerliste
+        ws.update(
+            range_name="B1",
+            values=[[f"Letzte Änderung:\n{now_str} Uhr"]],
+            value_input_option="USER_ENTERED",
+        )
+        ws.update(
+            range_name="D1",
+            values=[[grids]],
+            value_input_option="USER_ENTERED",
+        )
+        ws.update(
+            range_name="Q1",
+            values=[["\n".join(drivers)]],
+            value_input_option="USER_ENTERED",
+        )
+        # Grid Override (Spalte F) auf 0 zurücksetzen
+        ws.update(
+            range_name="F1",
+            values=[[0]],
+            value_input_option="USER_ENTERED",
+        )
+        log.info(f"Google Sheets aktualisiert (Apollo-Grabber, type={event_type}).")
+
+        # ── Bei neuem Event: LobbyCodes leeren ─────────────────────────────
+        if event_type == "cleancodes":
+            lc = sh.worksheet("LobbyCodes")
+            lc.batch_clear(["A2:C500"])
+            log.info("Google Sheets: LobbyCodes A2:C500 geleert.")
+
+    loop = asyncio.get_event_loop()
     try:
-        async with session.post(MAKE_WEBHOOK_URL, json=payload) as r:
-            if r.status in (200, 201, 204):
-                state["last_sync_make"] = iso_now()
-                log.info(f"Make.com Webhook ({event_type}) gesendet.")
-            else:
-                text = await r.text()
-                log.warning(f"Make.com Webhook -> {r.status}: {text[:200]}")
+        await loop.run_in_executor(None, _do_sync)
+        state["last_sync_sheets"] = iso_now()
     except Exception as e:
-        log.error(f"Make.com Webhook Fehler: {e}")
+        log.error(f"Google Sheets Sync Fehler: {e}")
 
 
 # ─────────────────────────────────────────────
@@ -1033,7 +1084,6 @@ async def clean_lobby_codes(session: aiohttp.ClientSession) -> None:
         DISCORD_TOKEN_LOBBYCODEGRABBER,
         {"content": MSG_LOBBYCODES},
     )
-    await send_to_make(session, "cleancodes")
     log.info("Lobby-Code Bereinigung abgeschlossen.")
 
 
@@ -1402,7 +1452,7 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
         # ── !clean codes ──────────────────────────────────────────────────
         if content_lower == "!clean codes":
             await clean_lobby_codes(session)
-            await send_to_make(session, "cleancodes")
+            await sync_to_sheets(session, "cleancodes")
             log_line = f"{ts} ⚙️ Lobby-Bereinigung durch {username}"
             append_event_log(log_line)
             _rebuild_discord_log(grids)
@@ -1545,7 +1595,7 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
 
 async def bootstrap(session: aiohttp.ClientSession) -> None:
     """
-    Run once when no state.json existed at startup (fresh Render deploy).
+    Run once when no state.json existed at startup (Erstinstallation / frische VM).
     Does NOT touch CHAN_LOG or CHAN_CODES — those channels are only cleaned
     when a genuinely new event is detected (had_previous_event=True).
     """
@@ -1581,9 +1631,9 @@ async def bootstrap(session: aiohttp.ClientSession) -> None:
 
 async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None:
     """Execute one complete pipeline iteration."""
-    trigger_make   = False
+    trigger_sheets   = False
     roster_changed = False
-    make_type      = "update"
+    sheets_type      = "update"
 
     # ── 0. Sunday-lock check – BEFORE any grid calculation ────────────────
     # Must run first so that the lock is active when recalculate_grids() is
@@ -1655,8 +1705,8 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
         state["last_grid_count"]   = 0
         state["registration_end_monday"] = ""   # will be set when embed is first parsed
 
-        trigger_make = True
-        make_type    = "cleancodes" if had_previous_event else "update"
+        trigger_sheets = True
+        sheets_type    = "cleancodes" if had_previous_event else "update"
 
         # Clear all log files
         for fp in (EVENT_LOG_FILE, DISCORD_LOG_FILE, ANMELDUNGEN_FILE):
@@ -1700,7 +1750,7 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
     )
 
     if content_changed:
-        trigger_make   = True
+        trigger_sheets   = True
         roster_changed = True
 
     state["event_title"]    = new_title
@@ -1770,12 +1820,12 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
         if extra_grid_triggered:
             await send_extra_grid_msg(session)
 
-        if make_type != "event_reset":
-            make_type = "update"
+        if sheets_type != "event_reset":
+            sheets_type = "update"
 
     # ── 5. Make.com sync ──────────────────────────────────────────────────
-    if trigger_make:
-        await send_to_make(session, make_type)
+    if trigger_sheets:
+        await sync_to_sheets(session, sheets_type)
         save_state()
 
     # ── 6. Discord CHAN_LOG update ────────────────────────────────────────

@@ -349,7 +349,15 @@ def registration_end_passed() -> bool:
     return n.hour > h or (n.hour == h and n.minute >= m)
 
 
-def is_sunday_lock_time() -> bool:
+def is_event_deletion_window() -> bool:
+    """True only on Tuesday between 09:45 and 10:15 Berlin time."""
+    n = now_berlin()
+    if n.weekday() != 1:  # 1 = Dienstag
+        return False
+    return (n.hour == 9 and n.minute >= 45) or (n.hour == 10 and n.minute < 15)
+
+
+
     """True on Sunday >= 18:00 Berlin, or any time on Monday."""
     n = now_berlin()
     if n.weekday() == 6 and n.hour >= 18:
@@ -1662,7 +1670,7 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
         had_previous_event = event_id != "0"
 
         # Delete old Apollo event post and its reminder thread if enabled
-        if int(cfg("ENABLE_DELETE_OLD_EVENT")) and event_id and event_id != "0":
+        if int(cfg("ENABLE_DELETE_OLD_EVENT")) and event_id and event_id != "0" and is_event_deletion_window():
             # Delete the event message itself
             await discord_delete(
                 session,

@@ -358,7 +358,7 @@ def is_event_deletion_window() -> bool:
     return (n.hour == 9 and n.minute >= 45) or (n.hour == 10 and n.minute < 15)
 
 
-
+def is_sunday_lock_time() -> bool:
     """True on Sunday >= 18:00 Berlin, or any time on Monday."""
     n = now_berlin()
     if n.weekday() == 6 and n.hour >= 18:

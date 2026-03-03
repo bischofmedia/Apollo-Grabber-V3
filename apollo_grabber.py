@@ -65,6 +65,7 @@ DISCORD_TOKEN_APOLLOGRABBER    = _env("DISCORD_TOKEN_APOLLOGRABBER", "")
 DISCORD_TOKEN_LOBBYCODEGRABBER = _env("DISCORD_TOKEN_LOBBYCODEGRABBER", "")
 USER_ID_ORGA      = [u.strip() for u in _env("USER_ID_ORGA", "").split(";") if u.strip()]
 DISCORD_ID_APOLLO = _env("DISCORD_ID_APOLLO", "")
+DISCORD_GUILD_ID  = _env("DISCORD_GUILD_ID", "")
 
 CHAN_APOLLO = _env("CHAN_APOLLO", "")
 CHAN_LOG    = _env("CHAN_LOG", "")
@@ -516,6 +517,24 @@ async def delete_all_messages(
 async def get_bot_user_id(session: aiohttp.ClientSession, token: str) -> str | None:
     data = await discord_get(session, "/users/@me", token)
     return data.get("id") if data else None
+
+
+async def get_display_name(
+    session: aiohttp.ClientSession,
+    user_id: str,
+    fallback: str,
+) -> str:
+    """Gibt den Server-Nickname zurück, falls vorhanden, sonst den globalen Username."""
+    if not DISCORD_GUILD_ID:
+        return fallback
+    data = await discord_get(
+        session,
+        f"/guilds/{DISCORD_GUILD_ID}/members/{user_id}",
+        DISCORD_TOKEN_APOLLOGRABBER,
+    )
+    if data:
+        return data.get("nick") or data.get("user", {}).get("global_name") or fallback
+    return fallback
 
 
 async def message_exists(
@@ -1414,7 +1433,7 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
         author_id = msg.get("author", {}).get("id", "")
         content   = msg.get("content", "").strip()
         msg_id    = msg.get("id", "")
-        username  = msg.get("author", {}).get("username", "Unknown")
+        username  = await get_display_name(session, author_id, msg.get("author", {}).get("username", "Unknown"))
 
         # Only process messages that match a known command pattern.
         # This protects log posts and any other non-command content in the channel.

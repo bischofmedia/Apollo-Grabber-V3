@@ -80,6 +80,7 @@ GOOGLE_SHEETS_ID          = _env("GOOGLE_SHEETS_ID", "")
 GOOGLE_CREDENTIALS_FILE   = _env("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 CMD_SCAN_INTERVAL_SECONDS = _env_int("CMD_SCAN_INTERVAL_SECONDS", 10)
 ENABLE_MULTILANGUAGE      = _env_int("ENABLE_MULTILANGUAGE", 0)
+DISCORD_GUILD_ID          = _env("DISCORD_GUILD_ID", "")
 
 # Message templates – loaded once from env at import time, never from state
 MSG_HILFETEXT          = _env_msg("MSG_HILFETEXT", "Kein Hilfetext konfiguriert.")
@@ -100,6 +101,8 @@ MSG_WAITLIST_MULTI     = _env_msg("MSG_WAITLIST_MULTI", "")
 MSG_WAITLIST_MULTI_EN  = _env_msg("MSG_WAITLIST_MULTI_EN", "")
 MSG_NEW_EVENT          = _env_msg("MSG_NEW_EVENT", "")
 MSG_NEW_EVENT_EN       = _env_msg("MSG_NEW_EVENT_EN", "")
+MSG_GRID_CHANGE_TEXT   = _env_msg("MSG_GRID_CHANGE_TEXT", "")
+MSG_GRID_CHANGE_TEXT_EN = _env_msg("MSG_GRID_CHANGE_TEXT_EN", "")
 
 # ─────────────────────────────────────────────
 # var_* keys – persisted in state.json, changeable via !set
@@ -151,6 +154,7 @@ DEFAULT_STATE: dict = {
     "sunday_msg_sent": False,
     "registration_end_logged": False,
     "ignored_drivers": [],
+    "driver_discord_cache": {},
     # var_* settings (defaults; overridden by env vars on first run)
     "var_ENABLE_EXTRA_GRID": 0,
     "var_ENABLE_MOVED_UP_MSG": 1,
@@ -1039,6 +1043,126 @@ def _get_gspread_client():
     return gspread.authorize(creds)
 
 
+# ─────────────────────────────────────────────
+# Driver → Discord ID mapping  (DB_drvr lookup)
+# ─────────────────────────────────────────────
+
+def _load_driver_discord_map() -> dict:
+    """
+    Read DB_drvr sheet (rows 5+), columns C (driver name) and J (server nick).
+    Returns {driver_name: server_nick}.
+    Runs synchronously – call via run_in_executor.
+    """
+    if not GOOGLE_SHEETS_ID:
+        return {}
+    try:
+        gc = _get_gspread_client()
+        sh = gc.open_by_key(GOOGLE_SHEETS_ID)
+        ws = sh.worksheet("DB_drvr")
+        rows = ws.get("C5:J500")
+        mapping = {}
+        for row in rows:
+            if len(row) >= 1 and row[0].strip():
+                name = row[0].strip()
+                nick = row[7].strip() if len(row) >= 8 else ""
+                if nick:
+                    mapping[name] = nick
+        log.info(f"DB_drvr geladen: {len(mapping)} Einträge.")
+        return mapping
+    except Exception as e:
+        log.error(f"DB_drvr Lesefehler: {e}")
+        return {}
+
+
+async def refresh_driver_discord_map(session: aiohttp.ClientSession) -> None:
+    """Load DB_drvr and resolve server nicks to Discord user IDs via Guild Members Search."""
+    loop = asyncio.get_event_loop()
+    name_to_nick = await loop.run_in_executor(None, _load_driver_discord_map)
+    if not name_to_nick:
+        return
+
+    # Resolve each nick to a user ID
+    cache = {}
+    for driver_name, nick in name_to_nick.items():
+        user_id = await _resolve_nick_to_id(session, nick)
+        if user_id:
+            cache[driver_name] = user_id
+        else:
+            log.debug(f"Discord ID nicht gefunden für Nick '{nick}' ({driver_name})")
+
+    state["driver_discord_cache"] = cache
+    log.info(f"Discord-ID-Cache: {len(cache)} Einträge aufgelöst.")
+
+
+async def _resolve_nick_to_id(session: aiohttp.ClientSession, nick: str) -> str | None:
+    """Search guild members by nick, return user ID or None."""
+    if not DISCORD_GUILD_ID or not nick:
+        return None
+    url = f"{DISCORD_API}/guilds/{DISCORD_GUILD_ID}/members/search"
+    params = {"query": nick, "limit": 5}
+    try:
+        async with session.get(
+            url,
+            headers={"Authorization": f"Bot {DISCORD_TOKEN_APOLLOGRABBER}"},
+            params=params,
+        ) as r:
+            if r.status != 200:
+                return None
+            members = await r.json()
+            for m in members:
+                member_nick = m.get("nick") or m.get("user", {}).get("username", "")
+                if member_nick.lower() == nick.lower():
+                    return m["user"]["id"]
+    except Exception as e:
+        log.error(f"Guild member search error: {e}")
+    return None
+
+
+def _mention(driver_name: str) -> str:
+    """Return <@ID> mention for driver, or plain name if not in cache."""
+    uid = state.get("driver_discord_cache", {}).get(driver_name)
+    if uid:
+        return f"<@{uid}>"
+    return driver_name.replace("\\", "")
+
+
+async def _send_dm(session: aiohttp.ClientSession, driver_name: str, text: str) -> None:
+    """Send a DM to a driver via their Discord user ID."""
+    uid = state.get("driver_discord_cache", {}).get(driver_name)
+    if not uid:
+        log.debug(f"DM nicht möglich – keine ID für {driver_name}")
+        return
+    try:
+        # Open DM channel
+        dm = await discord_post(
+            session,
+            "/users/@me/channels",
+            DISCORD_TOKEN_APOLLOGRABBER,
+            {"recipient_id": uid},
+        )
+        if not dm:
+            return
+        channel_id = dm.get("id")
+        if channel_id:
+            await discord_post(
+                session,
+                f"/channels/{channel_id}/messages",
+                DISCORD_TOKEN_APOLLOGRABBER,
+                {"content": text},
+            )
+            log.info(f"DM gesendet an {driver_name} ({uid})")
+    except Exception as e:
+        log.error(f"DM Fehler für {driver_name}: {e}")
+
+
+def _is_monday_gridchange_time() -> bool:
+    """True on Monday between 18:00 and 20:30 Berlin time."""
+    n = now_berlin()
+    if n.weekday() != 0:
+        return False
+    return (n.hour == 18) or (n.hour == 19) or (n.hour == 20 and n.minute <= 30)
+
+
 async def sync_to_sheets(session: aiohttp.ClientSession, event_type: str) -> None:
     """
     Schreibt Fahrerdaten direkt in das Google Sheet.
@@ -1280,24 +1404,72 @@ async def send_waitlist_msg(session: aiohttp.ClientSession, names: list) -> None
                            DISCORD_TOKEN_APOLLOGRABBER, {"content": text})
 
 
-async def send_moved_up_msg(session: aiohttp.ClientSession, names: list) -> None:
-    """Block 9.4 – notify when driver(s) move up from waitlist to grid."""
+async def send_moved_up_msg(
+    session: aiohttp.ClientSession,
+    names: list,
+    removed: list | None = None,
+) -> None:
+    """Block 9.4 – notify when driver(s) move up from waitlist to grid.
+
+    names   : list of drivers who moved up
+    removed : list of drivers who cancelled (for {abgesagt} placeholder)
+    """
     if not int(cfg("ENABLE_MOVED_UP_MSG")) or not names:
         return
+
+    removed = removed or []
+    capacity = grid_capacity(int(state.get("last_grid_count", 0)))
+
     if len(names) == 1:
         de, en = _pick_bilingual(MSG_MOVED_UP_SINGLE, MSG_MOVED_UP_SINGLE_EN)
-        name_de = _format_names(names, "und")
-        name_en = _format_names(names, "and")
     else:
         de, en = _pick_bilingual(MSG_MOVED_UP_MULTI, MSG_MOVED_UP_MULTI_EN)
-        name_de = _format_names(names, "und")
-        name_en = _format_names(names, "and")
-    de = de.replace("{driver_names}", name_de)
-    en = en.replace("{driver_names}", name_en)
+
+    # Build name strings with mentions
+    name_de = _format_names([_mention(n) for n in names], "und")
+    name_en = _format_names([_mention(n) for n in names], "and")
+    abgesagt_de = _format_names([_mention(n) for n in removed], "und") if removed else "–"
+    abgesagt_en = _format_names([_mention(n) for n in removed], "and") if removed else "–"
+
+    for tmpl, lang in [(de, "de"), (en, "en")]:
+        nd = name_de if lang == "de" else name_en
+        ab = abgesagt_de if lang == "de" else abgesagt_en
+        # {grid}: grid number of the first moved-up driver
+        drivers = state.get("drivers", [])
+        grid_num = "–"
+        if names:
+            try:
+                pos = drivers.index(names[0])
+                grid_num = str((pos // DRIVERS_PER_GRID) + 1)
+            except ValueError:
+                pass
+        result = tmpl.replace("{driver_names}", nd)                      .replace("{abgesagt}", ab)                      .replace("{grid}", grid_num)
+        if lang == "de":
+            de = result
+        else:
+            en = result
+
     text = _format_bilingual(de, en)
     if text:
         await discord_post(session, f"/channels/{CHAN_NEWS}/messages",
                            DISCORD_TOKEN_APOLLOGRABBER, {"content": text})
+
+    # DM each moved-up driver
+    for name in names:
+        drivers = state.get("drivers", [])
+        grid_num = "–"
+        try:
+            pos = drivers.index(name)
+            grid_num = str((pos // DRIVERS_PER_GRID) + 1)
+        except ValueError:
+            pass
+        abgesagt_str = _format_names([n.replace("\\", "") for n in removed], "und") if removed else "–"
+        dm_text = (
+            f"Hey {name.replace(chr(92), '')}! "
+            f"Du bist von der Warteliste in Grid {grid_num} nachgerückt"
+            + (f" (Abmeldung: {abgesagt_str})" if removed else "") + "."
+        )
+        await _send_dm(session, name, dm_text)
 
 
 async def send_grid_full_msg(session: aiohttp.ClientSession, new_grids: int) -> None:
@@ -1327,6 +1499,33 @@ async def send_extra_grid_msg(session: aiohttp.ClientSession) -> None:
     if text:
         await discord_post(session, f"/channels/{CHAN_NEWS}/messages",
                            DISCORD_TOKEN_APOLLOGRABBER, {"content": text})
+
+
+async def send_grid_change_msg(session: aiohttp.ClientSession, drivers_changed: list) -> None:
+    """
+    Monday 18:00-20:30: notify drivers who must change grid due to sign-ups/cancellations.
+    drivers_changed: list of (driver_name, old_grid, new_grid) tuples.
+    Uses MSG_GRID_CHANGE_TEXT with placeholders {driver_names}, {old_grid}, {new_grid}.
+    Each affected driver also receives a DM.
+    """
+    if not _is_monday_gridchange_time() or not drivers_changed:
+        return
+    if not MSG_GRID_CHANGE_TEXT:
+        return
+
+    for name, old_grid, new_grid in drivers_changed:
+        de, en = _pick_bilingual(MSG_GRID_CHANGE_TEXT, MSG_GRID_CHANGE_TEXT_EN)
+        mention = _mention(name)
+        de = de.replace("{driver_names}", mention)                .replace("{old_grid}", str(old_grid))                .replace("{new_grid}", str(new_grid))
+        en = en.replace("{driver_names}", mention)                .replace("{old_grid}", str(old_grid))                .replace("{new_grid}", str(new_grid))
+        text = _format_bilingual(de, en)
+        if text:
+            await discord_post(session, f"/channels/{CHAN_NEWS}/messages",
+                               DISCORD_TOKEN_APOLLOGRABBER, {"content": text})
+        # DM
+        clean_name = name.replace("\\", "")
+        dm_text = f"Hey {clean_name}! Aufgrund von Änderungen in der Fahrerliste wechselst du von Grid {old_grid} zu Grid {new_grid}."
+        await _send_dm(session, name, dm_text)
 
 
 async def send_new_event_msg(session: aiohttp.ClientSession) -> None:
@@ -1625,7 +1824,7 @@ async def handle_commands(session: aiohttp.ClientSession, bot_user_id: str) -> N
             if newly_waitlisted:
                 await send_waitlist_msg(session, newly_waitlisted)
             if newly_moved_up:
-                await send_moved_up_msg(session, newly_moved_up)
+                await send_moved_up_msg(session, newly_moved_up, [])
             continue
 
 
@@ -1664,6 +1863,7 @@ async def bootstrap(session: aiohttp.ClientSession) -> None:
 
     save_state()
     append_event_log(f"{ts_str()} ⚙️ Systemupdate")
+    await refresh_driver_discord_map(session)
     log.info("Bootstrap abgeschlossen.")
 
 
@@ -1768,6 +1968,7 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
                 )
 
         append_event_log(f"{ts_str()} ⚙️ New Event")
+        await refresh_driver_discord_map(session)
         save_state()
 
         # New-event notification – only when a real previous event existed,
@@ -1783,6 +1984,7 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
 
     old_drivers = list(state.get("drivers", []))
     old_title   = state.get("event_title", "")
+    old_status  = dict(state.get("driver_status", {}))
 
     # FIX #7: title change also triggers roster_changed / trigger_make
     content_changed = (
@@ -1851,13 +2053,30 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
             await send_waitlist_msg(session, changes["waitlisted"])
 
         if changes["moved_up"]:
-            await send_moved_up_msg(session, changes["moved_up"])
+            await send_moved_up_msg(session, changes["moved_up"], changes["removed"])
 
         # Grid-full message: only when grids increase organically (no lock active)
         if (new_grids > old_grids
                 and old_grids > 0
                 and not (state.get("sunday_lock") or state.get("man_lock"))):
             await send_grid_full_msg(session, new_grids)
+
+        # Monday 18:00-20:30: detect grid changes and notify affected drivers
+        if _is_monday_gridchange_time() and (changes["added"] or changes["removed"]):
+            # Compare old vs new grid assignment for every driver
+            new_st = state.get("driver_status", {})
+            drivers_list = state.get("drivers", [])
+            grid_changed = []
+            for i, name in enumerate(drivers_list):
+                new_grid_num = (i // DRIVERS_PER_GRID) + 1
+                # Find old grid number from old driver list
+                if name in old_drivers:
+                    old_pos = old_drivers.index(name)
+                    old_grid_num = (old_pos // DRIVERS_PER_GRID) + 1
+                    if old_grid_num != new_grid_num:
+                        grid_changed.append((name, old_grid_num, new_grid_num))
+            if grid_changed:
+                await send_grid_change_msg(session, grid_changed)
 
         if extra_grid_triggered:
             await send_extra_grid_msg(session)

@@ -80,7 +80,6 @@ GOOGLE_SHEETS_ID          = _env("GOOGLE_SHEETS_ID", "")
 GOOGLE_CREDENTIALS_FILE   = _env("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 CMD_SCAN_INTERVAL_SECONDS = _env_int("CMD_SCAN_INTERVAL_SECONDS", 10)
 ENABLE_MULTILANGUAGE      = _env_int("ENABLE_MULTILANGUAGE", 0)
-DISCORD_GUILD_ID          = _env("DISCORD_GUILD_ID", "")
 
 # Message templates – loaded once from env at import time, never from state
 MSG_HILFETEXT          = _env_msg("MSG_HILFETEXT", "Kein Hilfetext konfiguriert.")

@@ -870,22 +870,31 @@ def _registration_status(grids: int) -> tuple[str, str]:
     """
     Returns (emoji, label) for the current registration status.
 
-    🟢 Anmeldung offen       – next sign-up goes directly into a grid slot
-    🟡 Anmeldung auf Warteliste – all grids full/locked, deadline not yet reached
-    🔴 Anmeldung gesperrt    – final registration deadline passed
+    🔴 Anmeldung gesperrt       – final registration deadline passed
+    🟢 Anmeldung offen          – next sign-up goes directly into a grid slot
+    🟡 Anmeldung auf Warteliste – next sign-up would land on the waitlist
+
+    Before Sunday 18:00: always green (grids can still expand up to MAX_GRIDS).
+    From Sunday 18:00: grids are locked, so only current capacity matters.
+      – driver_count < capacity → green (slot still free in existing grids)
+      – driver_count >= capacity → yellow (next sign-up goes to waitlist)
+    Final deadline (REGISTRATION_END_TIME on Monday): red.
     """
     if registration_end_passed():
         return "🔴", "Anmeldung gesperrt"
-    capacity     = grid_capacity(grids)
+
     driver_count = len(state.get("drivers", []))
     locked       = state.get("sunday_lock") or state.get("man_lock")
-    max_capacity = grid_capacity(MAX_GRIDS)
-    # Open: free slots still available and not locked beyond max
-    if driver_count < capacity and not locked:
+
+    if locked:
+        # Grids are fixed – check against current capacity only
+        capacity = grid_capacity(grids)
+        if driver_count < capacity:
+            return "🟢", "Anmeldung offen"
+        return "🟡", "Anmeldung auf Warteliste"
+    else:
+        # Grids can still expand up to MAX_GRIDS – always green
         return "🟢", "Anmeldung offen"
-    if driver_count < max_capacity and not locked:
-        return "🟢", "Anmeldung offen"
-    return "🟡", "Anmeldung auf Warteliste"
 
 
 def _status_emoji(grids: int) -> str:

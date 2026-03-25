@@ -1500,31 +1500,100 @@ async def send_extra_grid_msg(session: aiohttp.ClientSession) -> None:
                            DISCORD_TOKEN_APOLLOGRABBER, {"content": text})
 
 
-async def send_grid_change_msg(session: aiohttp.ClientSession, drivers_changed: list) -> None:
+async def _read_grids_sheet() -> dict:
     """
-    Monday 18:00-20:30: notify drivers who must change grid due to sign-ups/cancellations.
-    drivers_changed: list of (driver_name, old_grid, new_grid) tuples.
-    Uses MSG_GRID_CHANGE_TEXT with placeholders {driver_names}, {old_grid}, {new_grid}.
-    Each affected driver also receives a DM.
+    Read sheet "Grids" and return {driver_name: grid_label}.
+    Grid labels: "1", "2", "2b", "3"
+
+    Layout (rows 3-20, 0-indexed cols from C=2):
+      Col C (offset 0)  = Grid 1
+      Col H (offset 5)  = Grid 2 / 2a
+      Col M (offset 10) = Grid 2b
+      Col R (offset 15) = Grid 3
     """
-    if not _is_monday_gridchange_time() or not drivers_changed:
-        return
-    if not MSG_GRID_CHANGE_TEXT:
+    if not GOOGLE_SHEETS_ID:
+        return {}
+    try:
+        gc = _get_gspread_client()
+        sh = gc.open_by_key(GOOGLE_SHEETS_ID)
+        ws = sh.worksheet("Grids")
+        rows = ws.get("C3:R20")
+        mapping = {}
+        col_labels = {0: "1", 5: "2", 10: "2b", 15: "3"}
+        for row in rows:
+            for col_offset, label in col_labels.items():
+                if col_offset < len(row):
+                    name = row[col_offset].strip()
+                    if name:
+                        mapping[name] = label
+        return mapping
+    except Exception as e:
+        log.error(f"Grids-Sheet Lesefehler: {e}")
+        return {}
+
+
+async def check_and_notify_grid_changes(
+    session: aiohttp.ClientSession,
+    added: list,
+    before: dict,
+) -> None:
+    """
+    Monday 18:00-20:30 workflow (called after sync_to_sheets):
+    1. "before" snapshot already read by caller before the write
+    2. Wait 5s for sheet recalculation
+    3. Read Grids sheet AFTER (snapshot "after")
+    4. For each driver in "before": if grid changed → notify in CHAN_NEWS + DM
+    5. For each newly added driver: notify which grid they start in
+    """
+    loop = asyncio.get_event_loop()
+
+    # Wait for sheet recalculation
+    await asyncio.sleep(5)
+
+    # Snapshot after
+    after = await loop.run_in_executor(None, _read_grids_sheet)
+    log.info(f"Grids-Snapshot nach Update: {len(after)} Fahrer")
+
+    if not before and not after:
         return
 
-    for name, old_grid, new_grid in drivers_changed:
-        de, en = _pick_bilingual(MSG_GRID_CHANGE_TEXT, MSG_GRID_CHANGE_TEXT_EN)
+    # Step 5: grid changes for existing drivers
+    for name, old_grid in before.items():
+        if name not in after:
+            continue  # cancelled driver – no grid change notification needed
+        new_grid = after[name]
+        if old_grid == new_grid:
+            continue
         mention = _mention(name)
-        de = de.replace("{driver_names}", mention)                .replace("{old_grid}", str(old_grid))                .replace("{new_grid}", str(new_grid))
-        en = en.replace("{driver_names}", mention)                .replace("{old_grid}", str(old_grid))                .replace("{new_grid}", str(new_grid))
+        de, en = _pick_bilingual(MSG_GRID_CHANGE_TEXT, MSG_GRID_CHANGE_TEXT_EN)
+        de = de.replace("{driver_names}", mention).replace("{old_grid}", old_grid).replace("{new_grid}", new_grid)
+        en = en.replace("{driver_names}", mention).replace("{old_grid}", old_grid).replace("{new_grid}", new_grid)
         text = _format_bilingual(de, en)
         if text:
             await discord_post(session, f"/channels/{CHAN_NEWS}/messages",
                                DISCORD_TOKEN_APOLLOGRABBER, {"content": text})
-        # DM
-        clean_name = name.replace("\\", "")
-        dm_text = f"Hey {clean_name}! Aufgrund von Änderungen in der Fahrerliste wechselst du von Grid {old_grid} zu Grid {new_grid}."
-        await _send_dm(session, name, dm_text)
+        clean = name.replace("\\", "")
+        await _send_dm(session, name,
+            f"Hey {clean}! Du wechselst aufgrund von Änderungen von Grid {old_grid} zu Grid {new_grid}.")
+
+    # Step 6: newly added drivers → which grid do they start in?
+    before_names = set(before.keys())
+    for name in added:
+        clean = name.replace("\\", "")
+        # Look up in "after" snapshot (try exact and case-insensitive)
+        new_grid = after.get(name) or after.get(clean)
+        if not new_grid:
+            for k, v in after.items():
+                if k.lower() == clean.lower():
+                    new_grid = v
+                    break
+        if new_grid:
+            mention = _mention(name)
+            text = f"{mention} startet in Grid {new_grid}."
+            await discord_post(session, f"/channels/{CHAN_NEWS}/messages",
+                               DISCORD_TOKEN_APOLLOGRABBER, {"content": text})
+            await _send_dm(session, name, f"Hey {clean}! Du startest in Grid {new_grid}.")
+
 
 
 async def send_new_event_msg(session: aiohttp.ClientSession) -> None:
@@ -2060,33 +2129,28 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
                 and not (state.get("sunday_lock") or state.get("man_lock"))):
             await send_grid_full_msg(session, new_grids)
 
-        # Monday 18:00-20:30: detect grid changes and notify affected drivers
-        if _is_monday_gridchange_time() and (changes["added"] or changes["removed"]):
-            # Compare old vs new grid assignment for every driver
-            new_st = state.get("driver_status", {})
-            drivers_list = state.get("drivers", [])
-            grid_changed = []
-            for i, name in enumerate(drivers_list):
-                new_grid_num = (i // DRIVERS_PER_GRID) + 1
-                # Find old grid number from old driver list
-                if name in old_drivers:
-                    old_pos = old_drivers.index(name)
-                    old_grid_num = (old_pos // DRIVERS_PER_GRID) + 1
-                    if old_grid_num != new_grid_num:
-                        grid_changed.append((name, old_grid_num, new_grid_num))
-            if grid_changed:
-                await send_grid_change_msg(session, grid_changed)
-
         if extra_grid_triggered:
             await send_extra_grid_msg(session)
 
         if sheets_type != "event_reset":
             sheets_type = "update"
 
-    # ── 5. Make.com sync ──────────────────────────────────────────────────
+    # ── 5. Sheet sync + Monday grid-change notifications ─────────────────
     if trigger_sheets:
+        # Monday 18:00-20:30: read Grids sheet BEFORE writing new driver list
+        _grids_before = {}
+        _added_this_cycle = changes.get("added", []) if roster_changed else []
+        if _is_monday_gridchange_time() and roster_changed:
+            loop = asyncio.get_event_loop()
+            _grids_before = await loop.run_in_executor(None, _read_grids_sheet)
+            log.info(f"Grids-Snapshot vor Sync: {len(_grids_before)} Fahrer")
+
         await sync_to_sheets(session, sheets_type)
         save_state()
+
+        # After write: notify grid changes and new signups
+        if _is_monday_gridchange_time() and roster_changed:
+            await check_and_notify_grid_changes(session, _added_this_cycle, _grids_before)
 
     # ── 6. Discord CHAN_LOG update ────────────────────────────────────────
     await _refresh_chan_log(session)

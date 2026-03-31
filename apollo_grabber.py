@@ -152,6 +152,7 @@ DEFAULT_STATE: dict = {
     # Triggers
     "sunday_msg_sent": False,
     "registration_end_logged": False,
+    "registration_end_locked": False,
     "ignored_drivers": [],
     "driver_discord_cache": {},
     # var_* settings (defaults; overridden by env vars on first run)
@@ -332,9 +333,15 @@ def set_registration_end_monday() -> None:
 
 def registration_end_passed() -> bool:
     """
-    FIX #8: True only when today matches registration_end_monday
-    AND Berlin time >= var_REGISTRATION_END_TIME (hh:mm).
+    True once the registration deadline has been reached and stays True
+    until the next event (registration_end_locked persists in state).
+
+    Two conditions trigger it:
+    1. registration_end_locked already set (sticky flag from previous cycle)
+    2. Today is registration_end_monday AND Berlin time >= REGISTRATION_END_TIME
     """
+    if state.get("registration_end_locked"):
+        return True
     ref_str = state.get("registration_end_monday", "")
     if not ref_str:
         return False
@@ -2012,6 +2019,7 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
         state["man_lock"]     = False
         state["manual_grids"] = None
         state["registration_end_logged"] = False
+        state["registration_end_locked"] = False
         state["ignored_drivers"]   = []
         state["driver_status"]     = {}
         state["drivers"]           = []
@@ -2071,7 +2079,9 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
     )
 
     if content_changed:
-        trigger_sheets   = True
+        # No automatic sync after registration deadline – !sync still works manually
+        if not state.get("registration_end_locked"):
+            trigger_sheets = True
         roster_changed = True
 
     state["event_title"]    = new_title
@@ -2089,6 +2099,7 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
         if reg_end and not state.get("registration_end_logged"):
             append_event_log(f"{ts_str()} ⚙️ Anmeldeschluss – keine weiteren Anmeldungen möglich")
             state["registration_end_logged"] = True
+            state["registration_end_locked"] = True
             save_state()
 
         # Grid count: recalculate_grids() respects locks and override internally

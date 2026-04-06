@@ -1226,6 +1226,35 @@ async def sync_to_sheets(session: aiohttp.ClientSession, event_type: str) -> Non
         if event_type == "cleancodes":
             lc = sh.worksheet("LobbyCodes")
             lc.batch_clear(["A2:C500"])
+
+        # ── Discord-IDs in DB_drvr Spalte DC eintragen (nur wenn leer) ──────
+        discord_cache = state.get("driver_discord_cache", {})
+        if discord_cache:
+            try:
+                db = sh.worksheet("DB_drvr")
+                # C5:DC500 – col C=name (offset 0), col DC=id (offset 104)
+                db_rows = db.get("C5:DC500")
+                updates = []
+                for row_idx, row in enumerate(db_rows):
+                    if not row or not row[0].strip():
+                        continue
+                    driver_name = row[0].strip()
+                    current_id = row[104].strip() if len(row) > 104 else ""
+                    if current_id:
+                        continue  # already filled
+                    uid = discord_cache.get(driver_name)
+                    if uid:
+                        sheet_row = row_idx + 5
+                        updates.append({
+                            "range": f"DC{sheet_row}",
+                            "values": [[str(uid)]],
+                        })
+                if updates:
+                    db.batch_update(updates, value_input_option="USER_ENTERED")
+                    log.info(f"Discord-IDs eingetragen: {len(updates)} Zeilen.")
+            except Exception as e:
+                log.error(f"Discord-ID Sync Fehler: {e}")
+
             log.info("Google Sheets: LobbyCodes A2:C500 geleert.")
 
     loop = asyncio.get_event_loop()

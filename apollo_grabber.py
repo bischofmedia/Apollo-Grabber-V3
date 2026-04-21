@@ -28,6 +28,15 @@ logging.basicConfig(
 )
 log = logging.getLogger("ApolloGrabber")
 
+# Also log to file with rotation (max 5 MB, keep 3 backups)
+try:
+    from logging.handlers import RotatingFileHandler as _RFH
+    _fh = _RFH("apollo_grabber.log", maxBytes=5*1024*1024, backupCount=3, encoding="utf-8")
+    _fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%Y-%m-%d %H:%M:%S"))
+    log.addHandler(_fh)
+except Exception:
+    pass
+
 BERLIN = ZoneInfo("Europe/Berlin")
 
 # ─────────────────────────────────────────────
@@ -1224,8 +1233,12 @@ async def sync_to_sheets(session: aiohttp.ClientSession, event_type: str) -> Non
 
         # ── Bei neuem Event: LobbyCodes leeren ─────────────────────────────
         if event_type == "cleancodes":
-            lc = sh.worksheet("LobbyCodes")
-            lc.batch_clear(["A2:C500"])
+            try:
+                lc = sh.worksheet("LobbyCodes")
+                lc.batch_clear(["A2:C500"])
+                log.info("Google Sheets: LobbyCodes A2:C500 geleert.")
+            except Exception as e:
+                log.error(f"Google Sheets: LobbyCodes leeren fehlgeschlagen: {e}")
 
         # ── Discord-IDs in DB_drvr Spalte DC eintragen (nur wenn leer) ──────
         discord_cache = state.get("driver_discord_cache", {})
@@ -1255,8 +1268,6 @@ async def sync_to_sheets(session: aiohttp.ClientSession, event_type: str) -> Non
             except Exception as e:
                 log.error(f"Discord-ID Sync Fehler: {e}")
 
-            log.info("Google Sheets: LobbyCodes A2:C500 geleert.")
-
     loop = asyncio.get_event_loop()
     try:
         await loop.run_in_executor(None, _do_sync)
@@ -1270,15 +1281,29 @@ async def sync_to_sheets(session: aiohttp.ClientSession, event_type: str) -> Non
 # ─────────────────────────────────────────────
 
 async def clean_lobby_codes(session: aiohttp.ClientSession) -> None:
-    """Delete ALL messages in CHAN_CODES and post MSG_LOBBYCODES. Sync to Make."""
+    """Delete ALL messages in CHAN_CODES and post MSG_LOBBYCODES."""
     log.info("Lobby-Code Bereinigung gestartet.")
-    await delete_all_messages(session, CHAN_CODES, DISCORD_TOKEN_LOBBYCODEGRABBER)
-    await discord_post(
-        session,
-        f"/channels/{CHAN_CODES}/messages",
-        DISCORD_TOKEN_LOBBYCODEGRABBER,
-        {"content": MSG_LOBBYCODES},
-    )
+    if not CHAN_CODES:
+        log.warning("CHAN_CODES nicht gesetzt – Lobby-Bereinigung übersprungen.")
+        return
+    if not DISCORD_TOKEN_LOBBYCODEGRABBER:
+        log.warning("DISCORD_TOKEN_LOBBYCODEGRABBER nicht gesetzt – Lobby-Bereinigung übersprungen.")
+        return
+    messages = await get_channel_messages(session, CHAN_CODES, DISCORD_TOKEN_LOBBYCODEGRABBER)
+    log.info(f"Lobby-Code Bereinigung: {len(messages)} Nachrichten gefunden.")
+    for msg in messages:
+        result = await discord_delete(session, f"/channels/{CHAN_CODES}/messages/{msg['id']}", DISCORD_TOKEN_LOBBYCODEGRABBER)
+        if not result:
+            log.warning(f"Lobby-Code Löschen fehlgeschlagen: {msg['id']}")
+    if MSG_LOBBYCODES:
+        result = await discord_post(
+            session,
+            f"/channels/{CHAN_CODES}/messages",
+            DISCORD_TOKEN_LOBBYCODEGRABBER,
+            {"content": MSG_LOBBYCODES},
+        )
+        if not result:
+            log.warning("Lobby-Code Platzhalter konnte nicht gepostet werden.")
     log.info("Lobby-Code Bereinigung abgeschlossen.")
 
 
@@ -2064,9 +2089,23 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
         trigger_sheets = True
         sheets_type    = "cleancodes" if had_previous_event else "update"
 
-        # Clear all log files
+        # Clear all log files and rotate the application log
         for fp in (EVENT_LOG_FILE, DISCORD_LOG_FILE, ANMELDUNGEN_FILE):
             fp.write_text("", encoding="utf-8")
+        # Rotate apollo_grabber.log so each event starts with a fresh log
+        try:
+            log_path = Path("apollo_grabber.log")
+            if log_path.exists():
+                import shutil
+                shutil.move(str(log_path), str(log_path.with_suffix(".prev.log")))
+                # Re-open the file handler
+                for handler in log.handlers:
+                    if hasattr(handler, "baseFilename"):
+                        handler.doRollover()
+                        break
+            log.info("Logdatei rotiert (neues Event).")
+        except Exception as e:
+            log.warning(f"Log-Rotation fehlgeschlagen: {e}")
 
         # CHAN_CODES and CHAN_LOG cleanup only when a real previous event existed.
         # On a fresh deploy (had_previous_event=False) these channels are left

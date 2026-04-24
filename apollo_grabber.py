@@ -1071,48 +1071,47 @@ def _get_gspread_client():
 # Driver → Discord ID mapping  (DB_drvr lookup)
 # ─────────────────────────────────────────────
 
-def _load_driver_discord_map() -> dict:
+def _load_driver_nicks() -> list:
     """
-    Read DB_drvr sheet (rows 5+), columns C (driver name) and J (server nick).
-    Returns {driver_name: server_nick}.
+    Read DB_drvr sheet (rows 5+), column J (server nick).
+    Returns list of server nicks.
     Runs synchronously – call via run_in_executor.
     """
     if not GOOGLE_SHEETS_ID:
-        return {}
+        return []
     try:
         gc = _get_gspread_client()
         sh = gc.open_by_key(GOOGLE_SHEETS_ID)
         ws = sh.worksheet("DB_drvr")
-        rows = ws.get("C5:J500")
-        mapping = {}
+        rows = ws.get("J5:J500")
+        nicks = []
         for row in rows:
-            if len(row) >= 1 and row[0].strip():
-                name = row[0].strip()
-                nick = row[7].strip() if len(row) >= 8 else ""
-                if nick:
-                    mapping[name] = nick
-        log.info(f"DB_drvr geladen: {len(mapping)} Einträge.")
-        return mapping
+            if row and row[0].strip():
+                nicks.append(row[0].strip())
+        log.info(f"DB_drvr geladen: {len(nicks)} Server-Nicks.")
+        return nicks
     except Exception as e:
         log.error(f"DB_drvr Lesefehler: {e}")
-        return {}
+        return []
 
 
 async def refresh_driver_discord_map(session: aiohttp.ClientSession) -> None:
-    """Load DB_drvr and resolve server nicks to Discord user IDs via Guild Members Search."""
+    """
+    Load server nicks from DB_drvr column J and resolve each to a Discord user ID.
+    Cache is {server_nick: user_id} – the apollo driver list uses server nicks directly.
+    """
     loop = asyncio.get_event_loop()
-    name_to_nick = await loop.run_in_executor(None, _load_driver_discord_map)
-    if not name_to_nick:
+    nicks = await loop.run_in_executor(None, _load_driver_nicks)
+    if not nicks:
         return
 
-    # Resolve each nick to a user ID
     cache = {}
-    for driver_name, nick in name_to_nick.items():
+    for nick in nicks:
         user_id = await _resolve_nick_to_id(session, nick)
         if user_id:
-            cache[driver_name] = user_id
+            cache[nick] = user_id
         else:
-            log.debug(f"Discord ID nicht gefunden für Nick '{nick}' ({driver_name})")
+            log.info(f"Discord ID nicht gefunden für Nick '{nick}'")
 
     state["driver_discord_cache"] = cache
     log.info(f"Discord-ID-Cache: {len(cache)} Einträge aufgelöst.")
@@ -1241,21 +1240,25 @@ async def sync_to_sheets(session: aiohttp.ClientSession, event_type: str) -> Non
                 log.error(f"Google Sheets: LobbyCodes leeren fehlgeschlagen: {e}")
 
         # ── Discord-IDs in DB_drvr Spalte DC eintragen (nur wenn leer) ──────
+        # Cache is {server_nick: user_id}. DB_drvr col J = server nick (offset 7
+        # from col C), col DC = user id (offset 104 from col C).
         discord_cache = state.get("driver_discord_cache", {})
         if discord_cache:
             try:
                 db = sh.worksheet("DB_drvr")
-                # C5:DC500 – col C=name (offset 0), col DC=id (offset 104)
+                # Read C5:DC500 – col C=name(0), col J=nick(7), col DC=id(104)
                 db_rows = db.get("C5:DC500")
                 updates = []
                 for row_idx, row in enumerate(db_rows):
                     if not row or not row[0].strip():
                         continue
-                    driver_name = row[0].strip()
+                    nick = row[7].strip() if len(row) > 7 else ""
+                    if not nick:
+                        continue
                     current_id = row[104].strip() if len(row) > 104 else ""
                     if current_id:
                         continue  # already filled
-                    uid = discord_cache.get(driver_name)
+                    uid = discord_cache.get(nick)
                     if uid:
                         sheet_row = row_idx + 5
                         updates.append({
@@ -1265,6 +1268,8 @@ async def sync_to_sheets(session: aiohttp.ClientSession, event_type: str) -> Non
                 if updates:
                     db.batch_update(updates, value_input_option="USER_ENTERED")
                     log.info(f"Discord-IDs eingetragen: {len(updates)} Zeilen.")
+                else:
+                    log.info("Discord-IDs: keine neuen Einträge.")
             except Exception as e:
                 log.error(f"Discord-ID Sync Fehler: {e}")
 

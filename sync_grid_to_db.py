@@ -298,7 +298,7 @@ def _upsert_streamer(cursor, name: str, url: str | None) -> int:
 
     if existing:
         streamer_id, existing_url = existing
-        if existing_url != url:
+        if existing_url != url and url is not None:
             cursor.execute(
                 "UPDATE streamers SET url = %s, platform = %s WHERE streamer_id = %s",
                 (url, platform, streamer_id)

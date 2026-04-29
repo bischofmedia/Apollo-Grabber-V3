@@ -4,21 +4,21 @@ sync_grid_to_db.py
 ==================
 Liest die aktuelle Grideinteilung aus dem Google Sheet (Tab "Grids")
 und schreibt sie als Snapshot in die MySQL-Tabelle `grid_assignments`.
+Legt Streamer in der `streamers`-Tabelle an bzw. aktualisiert sie.
 
 Aufruf direkt:
     python3 sync_grid_to_db.py
 
-Aufruf vom Bot (non-blocking, wartet nicht auf Ergebnis):
+Aufruf vom Bot (non-blocking):
     import subprocess
     subprocess.Popen(
-        ["python3", "/home/user/sync_grid_to_db.py"],
+        ["python3", "/home/ubuntu/RTC_ApolloGrabber/sync_grid_to_db.py"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
 
 Google Sheets API:
     Nur EIN get_all_values()-Call, um das Rate-Limit (60 Req/Min) zu schonen.
-    Das komplette Sheet wird einmal geladen und dann lokal geparst.
 
 Benötigte .env-Variablen:
     GOOGLE_CREDENTIALS_FILE   Pfad zur service-account JSON
@@ -30,25 +30,16 @@ Benötigte .env-Variablen:
     DB_PASSWORD               MySQL-Passwort
     DB_NAME                   Datenbankname
 
-SQL zum einmaligen Anlegen der Tabelle:
-    CREATE TABLE grid_assignments (
-        assignment_id  INT AUTO_INCREMENT PRIMARY KEY,
-        grid_number    VARCHAR(5)    NOT NULL,
-        position       TINYINT       NOT NULL,
-        psn_name       VARCHAR(100)  NOT NULL,
-        driver_id      INT           NULL,
-        current_rating DECIMAL(6,4)  NULL,
-        is_host        TINYINT(1)    NOT NULL DEFAULT 0,
-        is_streamer    TINYINT(1)    NOT NULL DEFAULT 0,
-        updated_at     DATETIME      NOT NULL,
-        INDEX idx_grid (grid_number),
-        FOREIGN KEY (driver_id) REFERENCES drivers(driver_id)
-            ON DELETE SET NULL
-    );
+SQL zum Hinzufügen von streamer_id in grid_assignments (einmalig):
+    ALTER TABLE grid_assignments
+        ADD COLUMN streamer_id INT NULL AFTER driver_id,
+        ADD FOREIGN KEY (streamer_id) REFERENCES streamers(streamer_id)
+            ON DELETE SET NULL;
 
 Grid-Nummern in der DB:
     '1'   Grid 1
-    '2'   Grid 2 / 2a
+    '2'   Grid 2  (wenn Grid-2b leer)
+    '2a'  Grid 2a (wenn Grid-2b Einträge hat)
     '2b'  Grid 2b
     '3'   Grid 3
     'WL'  Warteliste
@@ -72,7 +63,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── Konfiguration ─────────────────────────────────────────────────────────────
-load_dotenv()
+load_dotenv("/etc/RTC_ApolloGrabber-env")
 
 CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE")
 SPREADSHEET_ID   = os.getenv("SPREADSHEET_ID")
@@ -89,36 +80,39 @@ DB_CONFIG = {
 
 # ── Spalten-Layout (0-basiert) ────────────────────────────────────────────────
 #
-# Datenzeilen starten ab Index 4 (= Zeile 5 im Sheet).
+# Datenzeilen ab Index 4 (= Zeile 5 im Sheet).
 #
-# Oberer Block (ohne Teams):
-#   Grid-1:  B=1(#)  C=2(Driver)  D=3(DR)
-#   Grid-2:  G=6(#)  H=7(Driver)  I=8(DR)
-#   Grid-2b: L=11(#) M=12(Driver) N=13(DR)
-#   Grid-3:  Q=16(#) R=17(Driver) S=18(DR)
-#   Warte:   V=21(#) W=22(Driver) X=23(DR)
+# Grid-Blöcke (col_pos, col_driver, col_dr, col_stream_url):
+#   Grid-1:  B=1(#)  C=2(Driver)  D=3(DR)   Stream-URL in B=1  (Zeile 22)
+#   Grid-2:  G=6(#)  H=7(Driver)  I=8(DR)   Stream-URL in G=6  (Zeile 22)
+#   Grid-2b: L=11(#) M=12(Driver) N=13(DR)  kein Stream
+#   Grid-3:  Q=16(#) R=17(Driver) S=18(DR)  Stream-URL in Q=16 (Zeile 22)
+#   Warte:   V=21(#) W=22(Driver) X=23(DR)  kein Stream
 #
-# Ranking-Lookup für Host-Rating (wenn DR-Zelle == 'Host'):
-#   AF=31 (PSN-Name), AG=32 (Ranking in %-Format)
+# Ranking-Lookup für Host-Rating:
+#   AF=31 (PSN-Name), AG=32 (Ranking)
+#
+# Stream-URL-Zeile: Index 21 (= Zeile 22 im Sheet)
 
 GRID_BLOCKS = [
-    # (grid_number, col_pos, col_driver, col_dr)
-    ("1",  1,  2,  3),
-    ("2",  6,  7,  8),
-    ("2b", 11, 12, 13),
-    ("3",  16, 17, 18),
+    # (fixed_grid_number, col_pos, col_driver, col_dr, col_stream_url)
+    # fixed_grid_number = None bedeutet: '2' oder '2a' je nach 2b-Inhalt
+    ("1",   1,  2,  3,  1),
+    (None,  6,  7,  8,  6),   # wird zu '2' oder '2a'
+    ("2b", 11, 12, 13, None),
+    ("3",  16, 17, 18, 16),
 ]
 
-WAITLIST_BLOCK     = ("WL", 21, 22, 23)
-RANKING_COL_NAME   = 31   # Spalte AF
-RANKING_COL_RATING = 32   # Spalte AG
-DATA_START_ROW     = 4    # Index 4 = Zeile 5
+WAITLIST_BLOCK     = ("WL", 21, 22, 23, None)
+RANKING_COL_NAME   = 31
+RANKING_COL_RATING = 32
+DATA_START_ROW     = 4
+STREAM_URL_ROW     = 21   # Index 21 = Zeile 22
 
 
 # ── Hilfsfunktionen ───────────────────────────────────────────────────────────
 
 def _cell(row: list, col: int) -> str | None:
-    """Gibt bereinigten Zellinhalt zurück, None wenn leer oder Spalte fehlt."""
     if col < len(row):
         val = str(row[col]).strip()
         return val if val else None
@@ -127,17 +121,14 @@ def _cell(row: list, col: int) -> str | None:
 
 def _parse_rating(raw: str | None) -> float:
     """
-    Wandelt '101,27%' → 1.0127.
-    Gibt 0.0 zurück wenn der Wert fehlt, leer oder nicht parsebar ist
-    (neue Fahrer ohne Ranking-Eintrag, Hosts nicht in der Liste, etc.).
-    'Streamer' und 'Host' als Eingabe ergeben ebenfalls 0.0.
+    '101,27%' → 1.0127
+    Gibt 0.0 zurück wenn Wert fehlt, leer oder nicht parsebar.
     """
     if not raw:
         return 0.0
     val = raw.replace("%", "").replace(",", ".").strip()
     try:
         parsed = float(val)
-        # Plausibilitäts-Check: Ratings liegen als %-Wert zwischen ~99 und 115
         if parsed > 10:
             return round(parsed / 100.0, 6)
         return round(parsed, 6)
@@ -145,11 +136,36 @@ def _parse_rating(raw: str | None) -> float:
         return 0.0
 
 
+def _detect_platform(url: str | None) -> str:
+    """Erkennt die Streaming-Platform aus der URL."""
+    if not url:
+        return "other"
+    url_lower = url.lower()
+    if "twitch.tv" in url_lower:
+        return "twitch"
+    if "youtube.com" in url_lower or "youtu.be" in url_lower:
+        return "youtube"
+    return "other"
+
+
+def _has_2b_entries(rows: list[list]) -> bool:
+    """Prüft ob Grid-2b (Spalte L=11) mindestens einen echten Fahrer hat."""
+    for row in rows[DATA_START_ROW:]:
+        pos_raw = _cell(row, 11)
+        drv_raw = _cell(row, 12)
+        if not pos_raw or not drv_raw:
+            continue
+        try:
+            int(pos_raw)
+            if not drv_raw.startswith("Grid-"):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def _build_ranking_lookup(rows: list[list]) -> dict[str, float]:
-    """
-    Erstellt {psn_name_lower: rating_float} aus den Ranking-Spalten AF/AG.
-    Fahrer ohne Rating-Wert in der Liste → 0.0.
-    """
+    """Erstellt {psn_name_lower: rating_float} aus den Ranking-Spalten AF/AG."""
     lookup: dict[str, float] = {}
     for row in rows[DATA_START_ROW:]:
         name = _cell(row, RANKING_COL_NAME)
@@ -162,22 +178,36 @@ def _build_ranking_lookup(rows: list[list]) -> dict[str, float]:
 def _parse_all_grids(
     rows: list[list],
     ranking_lookup: dict[str, float],
+    grid2_name: str,
 ) -> list[dict]:
     """
-    Parst alle Grid-Blöcke und die Warteliste aus den Sheet-Rohdaten.
+    Parst alle Grid-Blöcke und die Warteliste.
 
     Regeln:
-    - DR == 'Streamer' → is_streamer=1, rating=None
+    - DR == 'Streamer' → is_streamer=1, rating=None, stream_url aus Zeile 22
     - DR == 'Host'     → is_host=1, rating aus Ranking-Lookup (0.0 wenn fehlt)
-    - Pos.2 Host hat gleichen Namen wie Pos.1 Streamer → überspringen
-    - DR == normales Rating → is_host=0, is_streamer=0, rating aus DR-Zelle
+    - Host == Streamer (gleicher Name) → überspringen
+    - DR == normales Rating → normaler Fahrer
+    - Fahrernamen die mit 'Grid-' beginnen → Header-Zeilen, überspringen
     - Warteliste leer → stillschweigend ignorieren
     """
     entries: list[dict] = []
     now = datetime.now(timezone.utc).replace(tzinfo=None)
 
-    for block in list(GRID_BLOCKS) + [WAITLIST_BLOCK]:
-        grid_number, c_pos, c_drv, c_dr = block
+    # Stream-URLs aus Zeile 22 vorab auslesen
+    stream_url_row = rows[STREAM_URL_ROW] if len(rows) > STREAM_URL_ROW else []
+
+    all_blocks = list(GRID_BLOCKS) + [WAITLIST_BLOCK]
+
+    for block in all_blocks:
+        fixed_gn, c_pos, c_drv, c_dr, c_url = block
+
+        # Grid-2 oder Grid-2a?
+        grid_number = fixed_gn if fixed_gn is not None else grid2_name
+
+        # Stream-URL für diesen Block aus Zeile 22
+        stream_url = _cell(stream_url_row, c_url) if c_url is not None else None
+
         streamer_name: str | None = None
 
         for row in rows[DATA_START_ROW:]:
@@ -192,17 +222,22 @@ def _parse_all_grids(
             except ValueError:
                 continue
 
-            is_streamer = 0
-            is_host     = 0
+            # Header-Zeilen überspringen (z.B. 'Grid-1', 'Grid-2a')
+            if drv_raw.startswith("Grid-"):
+                continue
+
+            is_streamer  = 0
+            is_host      = 0
             rating: float | None = None
+            entry_stream_url: str | None = None
 
             if dr_raw == "Streamer":
-                is_streamer   = 1
-                streamer_name = drv_raw.lower()
-                rating        = None   # Streamer haben kein DR-Rating
+                is_streamer      = 1
+                streamer_name    = drv_raw.lower()
+                rating           = None
+                entry_stream_url = stream_url
 
             elif dr_raw == "Host":
-                # Host identisch mit Streamer → kein zweiter Eintrag
                 if streamer_name and drv_raw.lower() == streamer_name:
                     log.debug(
                         "Grid %s: Host '%s' == Streamer – wird übersprungen.",
@@ -218,7 +253,6 @@ def _parse_all_grids(
                     )
 
             else:
-                # Normaler Fahrer
                 rating = _parse_rating(dr_raw)
                 if rating == 0.0:
                     log.info(
@@ -234,6 +268,7 @@ def _parse_all_grids(
                 "current_rating": rating,
                 "is_host":        is_host,
                 "is_streamer":    is_streamer,
+                "stream_url":     entry_stream_url,
                 "updated_at":     now,
             })
 
@@ -243,15 +278,51 @@ def _parse_all_grids(
 # ── Datenbank ─────────────────────────────────────────────────────────────────
 
 def _fetch_driver_id_map(cursor) -> dict[str, int]:
-    """Lädt alle PSN-Namen aus `drivers` als Lowercase-Lookup."""
     cursor.execute("SELECT driver_id, psn_name FROM drivers")
     return {row[1].lower(): row[0] for row in cursor.fetchall()}
+
+
+def _upsert_streamer(cursor, name: str, url: str | None) -> int:
+    """
+    Legt einen Streamer an wenn er noch nicht existiert, oder aktualisiert
+    die URL wenn sie sich geändert hat.
+    Gibt die streamer_id zurück.
+    """
+    platform = _detect_platform(url)
+
+    cursor.execute(
+        "SELECT streamer_id, url FROM streamers WHERE name = %s",
+        (name,)
+    )
+    existing = cursor.fetchone()
+
+    if existing:
+        streamer_id, existing_url = existing
+        if existing_url != url:
+            cursor.execute(
+                "UPDATE streamers SET url = %s, platform = %s WHERE streamer_id = %s",
+                (url, platform, streamer_id)
+            )
+            log.info("Streamer '%s' aktualisiert (URL geändert).", name)
+        return streamer_id
+    else:
+        cursor.execute(
+            "INSERT INTO streamers (name, platform, url, is_active) "
+            "VALUES (%s, %s, %s, 1)",
+            (name, platform, url)
+        )
+        streamer_id = cursor.lastrowid
+        log.info(
+            "Neuer Streamer '%s' angelegt (platform=%s, id=%d).",
+            name, platform, streamer_id,
+        )
+        return streamer_id
 
 
 def _write_to_db(entries: list[dict]) -> tuple[int, int]:
     """
     Schreibt den Grid-Snapshot in die DB.
-    Ablauf: TRUNCATE → INSERT mit driver_id-Lookup.
+    Ablauf: TRUNCATE → Streamer upserten → INSERT mit FKs.
     Gibt (inserted_count, unmatched_count) zurück.
     """
     conn   = mysql.connector.connect(**DB_CONFIG)
@@ -265,17 +336,22 @@ def _write_to_db(entries: list[dict]) -> tuple[int, int]:
 
         insert_sql = """
             INSERT INTO grid_assignments
-                (grid_number, position, psn_name, driver_id,
+                (grid_number, position, psn_name, driver_id, streamer_id,
                  current_rating, is_host, is_streamer, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
 
         inserted  = 0
         unmatched = 0
 
         for e in entries:
+            driver_id   = None
+            streamer_id = None
+
             if e["is_streamer"]:
-                driver_id = None   # Streamer nicht gegen drivers matchen
+                streamer_id = _upsert_streamer(
+                    cursor, e["psn_name"], e["stream_url"]
+                )
             else:
                 driver_id = driver_map.get(e["psn_name"].lower())
                 if driver_id is None:
@@ -291,6 +367,7 @@ def _write_to_db(entries: list[dict]) -> tuple[int, int]:
                 e["position"],
                 e["psn_name"],
                 driver_id,
+                streamer_id,
                 e["current_rating"],
                 e["is_host"],
                 e["is_streamer"],
@@ -342,18 +419,22 @@ def main() -> None:
         max(len(r) for r in all_values) if all_values else 0,
     )
 
-    # 2. Daten parsen
+    # 2. Grid-2 oder Grid-2a?
+    grid2_name = "2a" if _has_2b_entries(all_values) else "2"
+    log.info("Grid-2 wird als '%s' gespeichert.", grid2_name)
+
+    # 3. Daten parsen
     ranking_lookup = _build_ranking_lookup(all_values)
     log.info("Ranking-Lookup: %d Fahrer.", len(ranking_lookup))
 
-    entries = _parse_all_grids(all_values, ranking_lookup)
+    entries = _parse_all_grids(all_values, ranking_lookup, grid2_name)
     log.info("Einträge geparst: %d.", len(entries))
 
     if not entries:
         log.warning("Keine Einträge gefunden – DB wird nicht verändert.")
         sys.exit(0)
 
-    # 3. In DB schreiben
+    # 4. In DB schreiben
     log.info("Schreibe in Datenbank …")
     inserted, unmatched = _write_to_db(entries)
 

@@ -10,6 +10,7 @@ import math
 import os
 import random
 import re
+import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2240,6 +2241,15 @@ async def run_pipeline(session: aiohttp.ClientSession, bot_user_id: str) -> None
 
         await sync_to_sheets(session, sheets_type)
         save_state()
+
+        # ── Grid-DB-Sync nach An-/Abmeldung ──────────────────────────────
+        if roster_changed:
+            log.info("Starte Grid-DB-Sync …")
+            subprocess.Popen(
+                ["python3", "/home/ubuntu/RTC_ApolloGrabber/sync_grid_to_db.py"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
 
         # After write: notify grid changes and new signups
         if _is_monday_gridchange_time() and roster_changed:
